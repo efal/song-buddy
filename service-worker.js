@@ -1,4 +1,4 @@
-const CACHE_NAME = 'song-buddy-v6-offline-fix';
+const CACHE_NAME = 'song-buddy-v8-stable';
 
 // Lokale Dateien, die statisch vorhanden sind
 const LOCAL_ASSETS = [
@@ -16,20 +16,18 @@ const LOCAL_ASSETS = [
 ];
 
 // Externe Bibliotheken (CDNs)
-// WICHTIG: Hier müssen ALLE URLs exakt so stehen, wie der Browser sie anfordert.
-// Auch Sub-Pfade wie /client oder /jsx-runtime müssen explizit gecacht werden.
 const EXTERNAL_LIB_ASSETS = [
   'https://cdn.tailwindcss.com',
   'https://aistudiocdn.com/react@^19.2.0',
-  'https://aistudiocdn.com/react@^19.2.0/jsx-runtime', // Wird oft implizit vom Compiler benötigt
+  'https://aistudiocdn.com/react@^19.2.0/jsx-runtime',
   'https://aistudiocdn.com/react-dom@^19.2.0',
-  'https://aistudiocdn.com/react-dom@^19.2.0/client', // WICHTIG für createRoot
+  'https://aistudiocdn.com/react-dom@^19.2.0/client',
   'https://aistudiocdn.com/lucide-react@^0.554.0',
   'https://aistudiocdn.com/@google/genai@^1.30.0'
 ];
 
 self.addEventListener('install', (event) => {
-  self.skipWaiting(); // Zwingt den neuen Service Worker sofort aktiv zu werden
+  self.skipWaiting();
   
   event.waitUntil(
     caches.open(CACHE_NAME).then(async (cache) => {
@@ -37,13 +35,12 @@ self.addEventListener('install', (event) => {
       await cache.addAll(LOCAL_ASSETS);
       
       console.log('[SW] Caching External Libs...');
-      // Wir nutzen map & catch, damit ein einzelner Fehler nicht alles abbricht,
-      // aber wir loggen Warnungen.
       const externalPromises = EXTERNAL_LIB_ASSETS.map(url => 
         fetch(url, { mode: 'cors' })
           .then(response => {
              if (response.ok) return cache.put(url, response);
-             throw new Error(`Bad status ${response.status} for ${url}`);
+             // Optional: Ignore errors for external libs if they fail (e.g. offline install)
+             return Promise.resolve();
           })
           .catch(e => console.warn(`[SW] Failed to cache external lib: ${url}`, e))
       );
@@ -70,9 +67,20 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+  // Safety Check: Ignore non-http schemes (like chrome-extension://, data:, etc.)
+  if (!event.request.url.startsWith('http')) {
+    return;
+  }
 
-  // 1. API Calls ignorieren (Google Gemini)
+  let url;
+  try {
+    url = new URL(event.request.url);
+  } catch (error) {
+    // Silent fail for invalid URLs
+    return;
+  }
+
+  // 1. API Calls ignorieren
   if (url.hostname.includes('generativelanguage.googleapis.com')) {
     return; 
   }
@@ -87,10 +95,8 @@ self.addEventListener('fetch', (event) => {
         if (cachedResponse) {
           return cachedResponse;
         }
-        // Wenn nicht im Cache, versuche Netzwerk und speichere es für die Zukunft
         return fetch(event.request)
           .then((networkResponse) => {
-             // Prüfen ob Response gültig ist
              if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === 'error') {
                return networkResponse;
              }

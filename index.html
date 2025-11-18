@@ -44,12 +44,9 @@
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-          // FIX: Construct absolute URL based on window.location to ignore any <base> tags 
-          // injected by the environment (which cause Origin Mismatch errors).
-          const swUrl = new URL('service-worker.js', window.location.href).href;
-          console.log('Attempting to register SW at:', swUrl);
-
-          navigator.serviceWorker.register(swUrl)
+          // Use simple relative path. This allows the browser to resolve the origin naturally,
+          // bypassing issues where window.location.href is proxied/masked in preview environments.
+          navigator.serviceWorker.register('./service-worker.js')
             .then(reg => {
               console.log('SW registered on:', reg.scope);
               // Check for updates
@@ -66,7 +63,15 @@
                 };
               };
             })
-            .catch(err => console.error('SW registration failed:', err));
+            .catch(err => {
+               // In preview environments (like AI Studio), origin mismatches are common due to iframes/proxies.
+               // We catch this specific error to keep the console clean and allow the app to run without SW in preview.
+               if (err.message && (err.message.includes('origin') || err.name === 'SecurityError')) {
+                 console.warn('Service Worker registration skipped (preview environment origin mismatch). Offline mode may not work in preview.');
+               } else {
+                 console.error('SW registration failed:', err);
+               }
+            });
         });
       }
     </script>
