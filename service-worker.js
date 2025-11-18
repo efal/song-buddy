@@ -1,4 +1,4 @@
-const CACHE_NAME = 'song-buddy-v9-stable';
+const CACHE_NAME = 'song-buddy-v12-sw-timing';
 
 // Lokale Dateien, die statisch vorhanden sind
 const LOCAL_ASSETS = [
@@ -39,7 +39,6 @@ self.addEventListener('install', (event) => {
         fetch(url, { mode: 'cors' })
           .then(response => {
              if (response.ok) return cache.put(url, response);
-             // Optional: Ignore errors for external libs if they fail (e.g. offline install)
              return Promise.resolve();
           })
           .catch(e => console.warn(`[SW] Failed to cache external lib: ${url}`, e))
@@ -67,7 +66,6 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Safety Check: Ignore non-http schemes (like chrome-extension://, data:, etc.)
   if (!event.request.url.startsWith('http')) {
     return;
   }
@@ -76,16 +74,13 @@ self.addEventListener('fetch', (event) => {
   try {
     url = new URL(event.request.url);
   } catch (error) {
-    // Silent fail for invalid URLs
     return;
   }
 
-  // 1. API Calls ignorieren
   if (url.hostname.includes('generativelanguage.googleapis.com')) {
     return; 
   }
 
-  // 2. Externe Libs: Cache First, Fallback Network
   if (EXTERNAL_LIB_ASSETS.includes(event.request.url) || 
       url.hostname === 'aistudiocdn.com' || 
       url.hostname === 'cdn.tailwindcss.com') {
@@ -112,12 +107,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 3. Lokale Dateien: Cache First
   if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(event.request).then((response) => {
         return response || fetch(event.request).catch(() => {
-           // Fallback für Navigation (SPA Support offline)
            if (event.request.mode === 'navigate') {
              return caches.match('./index.html');
            }

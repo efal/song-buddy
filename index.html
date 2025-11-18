@@ -44,9 +44,8 @@
     <script type="module" src="./index.tsx"></script>
     <script>
       if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          // Use simple relative path. This allows the browser to resolve the origin naturally,
-          // bypassing issues where window.location.href is proxied/masked in preview environments.
+        const registerServiceWorker = () => {
+          // Use simple relative path. This allows the browser to resolve the origin naturally.
           navigator.serviceWorker.register('./service-worker.js')
             .then(reg => {
               console.log('SW registered on:', reg.scope);
@@ -65,15 +64,22 @@
               };
             })
             .catch(err => {
-               // In preview environments (like AI Studio), origin mismatches are common due to iframes/proxies.
-               // We catch this specific error to keep the console clean and allow the app to run without SW in preview.
+               // In preview environments (like AI Studio), origin mismatches are common.
                if (err.message && (err.message.includes('origin') || err.name === 'SecurityError')) {
-                 console.warn('Service Worker registration skipped (preview environment origin mismatch). Offline mode may not work in preview.');
+                 console.warn('Service Worker registration skipped (preview environment origin mismatch).');
                } else {
                  console.error('SW registration failed:', err);
                }
             });
-        });
+        };
+
+        // Robust check: if page is already loaded, register immediately. 
+        // Otherwise wait for load event.
+        if (document.readyState === 'complete') {
+          registerServiceWorker();
+        } else {
+          window.addEventListener('load', registerServiceWorker);
+        }
       }
     </script>
   </body>
