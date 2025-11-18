@@ -44,42 +44,34 @@
     <script type="module" src="./index.tsx"></script>
     <script>
       if ('serviceWorker' in navigator) {
-        const registerServiceWorker = () => {
-          // Use simple relative path. This allows the browser to resolve the origin naturally.
-          navigator.serviceWorker.register('./service-worker.js')
-            .then(reg => {
-              console.log('SW registered on:', reg.scope);
-              // Check for updates
-              reg.onupdatefound = () => {
-                const installingWorker = reg.installing;
-                installingWorker.onstatechange = () => {
-                  if (installingWorker.state === 'installed') {
-                    if (navigator.serviceWorker.controller) {
-                      console.log('New content is available; please refresh.');
-                    } else {
-                      console.log('Content is cached for offline use.');
-                    }
+        const registerSW = async () => {
+          try {
+            // Explicitly define scope to ensure start_url in manifest is controlled
+            const reg = await navigator.serviceWorker.register('./service-worker.js', { scope: './' });
+            console.log('SW registered with scope:', reg.scope);
+            
+            reg.onupdatefound = () => {
+              const installingWorker = reg.installing;
+              installingWorker.onstatechange = () => {
+                if (installingWorker.state === 'installed') {
+                  if (navigator.serviceWorker.controller) {
+                    console.log('New content available - refresh needed.');
+                  } else {
+                    console.log('Content cached for offline use.');
                   }
-                };
+                }
               };
-            })
-            .catch(err => {
-               // In preview environments (like AI Studio), origin mismatches are common.
-               if (err.message && (err.message.includes('origin') || err.name === 'SecurityError')) {
-                 console.warn('Service Worker registration skipped (preview environment origin mismatch).');
-               } else {
-                 console.error('SW registration failed:', err);
-               }
-            });
+            };
+          } catch (err) {
+             if (err.message && (err.message.includes('origin') || err.name === 'SecurityError')) {
+                 console.warn('SW Registration skipped: Origin mismatch or preview environment.');
+             } else {
+                 console.error('SW Registration failed:', err);
+             }
+          }
         };
 
-        // Robust check: if page is already loaded, register immediately. 
-        // Otherwise wait for load event.
-        if (document.readyState === 'complete') {
-          registerServiceWorker();
-        } else {
-          window.addEventListener('load', registerServiceWorker);
-        }
+        window.addEventListener('load', registerSW);
       }
     </script>
   </body>

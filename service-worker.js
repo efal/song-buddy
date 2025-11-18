@@ -1,4 +1,4 @@
-const CACHE_NAME = 'song-buddy-v12-sw-timing';
+const CACHE_NAME = 'song-buddy-v13-pwa-fix';
 
 // Lokale Dateien, die statisch vorhanden sind
 const LOCAL_ASSETS = [
@@ -66,6 +66,7 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  // Nur http(s) Requests behandeln
   if (!event.request.url.startsWith('http')) {
     return;
   }
@@ -77,10 +78,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // API Calls ignorieren
   if (url.hostname.includes('generativelanguage.googleapis.com')) {
     return; 
   }
 
+  // Strategy: Cache First, falling back to Network (für Libs)
   if (EXTERNAL_LIB_ASSETS.includes(event.request.url) || 
       url.hostname === 'aistudiocdn.com' || 
       url.hostname === 'cdn.tailwindcss.com') {
@@ -107,12 +110,18 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Strategy: Stale-While-Revalidate or Network First for local app files
   if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(event.request).then((response) => {
-        return response || fetch(event.request).catch(() => {
+        // Return cached response immediately if available
+        if (response) return response;
+        
+        // Fallback to network
+        return fetch(event.request).catch(() => {
+           // Offline Fallback für Navigation
            if (event.request.mode === 'navigate') {
-             return caches.match('./index.html');
+             return caches.match('./index.html') || caches.match('./');
            }
         });
       })
