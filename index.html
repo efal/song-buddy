@@ -38,19 +38,34 @@
   }
 }
 </script>
-<link rel="stylesheet" href="/index.css">
 </head>
   <body class="bg-slate-950 text-slate-200 font-sans antialiased overflow-hidden">
     <div id="root" class="h-screen w-screen flex flex-col"></div>
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
+          // Use a relative path. The browser resolves this relative to the current document location,
+          // which is robust across different hosting environments and avoids origin mismatch errors.
           navigator.serviceWorker.register('./service-worker.js')
-            .then(reg => console.log('SW registered'))
-            .catch(err => console.log('SW registration failed', err));
+            .then(reg => {
+              console.log('SW registered on:', reg.scope);
+              // Check for updates
+              reg.onupdatefound = () => {
+                const installingWorker = reg.installing;
+                installingWorker.onstatechange = () => {
+                  if (installingWorker.state === 'installed') {
+                    if (navigator.serviceWorker.controller) {
+                      console.log('New content is available; please refresh.');
+                    } else {
+                      console.log('Content is cached for offline use.');
+                    }
+                  }
+                };
+              };
+            })
+            .catch(err => console.error('SW registration failed:', err));
         });
       }
     </script>
-  <script type="module" src="/index.tsx"></script>
-</body>
+  </body>
 </html>
