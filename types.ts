@@ -9,6 +9,7 @@ export interface Song {
   fontSize: number; // px
   autoStartEnabled?: boolean;
   audioThreshold?: number; // 0-100
+  voiceControlEnabled?: boolean;
 }
 
 export interface AppState {

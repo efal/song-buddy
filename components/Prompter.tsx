@@ -1,6 +1,47 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Song, PlayState } from '../types';
-import { Play, Pause, RotateCcw, ArrowLeft, Type, Gauge, Mic, MicOff, Activity } from 'lucide-react';
+import { Play, Pause, RotateCcw, ArrowLeft, Type, Gauge, Mic, MicOff, Activity, Speech, Zap, Ear } from 'lucide-react';
+
+// Typ-Definitionen für Speech Recognition (noch experimentell in Browsern)
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionResultList {
+  length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionResult {
+  isFinal: boolean;
+  [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: (event: SpeechRecognitionEvent) => void;
+  onerror: (event: any) => void;
+  onend: () => void;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+}
 
 interface PrompterProps {
   song: Song;
@@ -11,11 +52,18 @@ interface PrompterProps {
 export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSettings }) => {
   const [playState, setPlayState] = useState<PlayState>(PlayState.STOPPED);
   
-  // Initialize with fallbacks - AutoStart defaults to TRUE now
+  // Initialize with fallbacks
   const [scrollSpeed, setScrollSpeed] = useState(song.defaultScrollSpeed ?? 2.0);
   const [fontSize, setFontSize] = useState(song.fontSize ?? 42);
+  
+  // Audio Trigger (AutoStart) State
   const [autoStartEnabled, setAutoStartEnabled] = useState(song.autoStartEnabled ?? true);
   const [audioThreshold, setAudioThreshold] = useState(song.audioThreshold ?? 20);
+  const [isListening, setIsListening] = useState(false); // Visual state for UI
+  
+  // Voice Command State
+  const [voiceControlEnabled, setVoiceControlEnabled] = useState(song.voiceControlEnabled ?? false);
+  const [lastVoiceCommand, setLastVoiceCommand] = useState<string | null>(null);
   
   const [progress, setProgress] = useState(0);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -28,37 +76,156 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const isScrollingRef = useRef(false);
   
-  // Audio refs to avoid stale closures in animation loop
+  // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const microphoneRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioFrameRef = useRef<number>();
   
-  // State Refs for the audio loop
+  // Voice Command Ref
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+  // State Refs for loops
   const playStateRef = useRef(playState);
   const autoStartEnabledRef = useRef(autoStartEnabled);
   const audioThresholdRef = useRef(audioThreshold);
   const isScrollingStateRef = useRef(isScrollingRef.current);
-  
-  // Cooldown ref to prevent instant re-triggering when manually pausing in loud environment
   const audioCooldownRef = useRef<number>(0);
   const progressRef = useRef(progress);
-  
-  // Confidence counter: Requires sustained volume to trigger (prevents spikes/claps from triggering)
   const triggerConfidenceCounterRef = useRef(0);
-  const REQUIRED_CONFIDENCE_FRAMES = 10; // Approx 160ms of sustained volume
+  
+  const REQUIRED_CONFIDENCE_FRAMES = 10;
 
   // Sync refs with state
   useEffect(() => { playStateRef.current = playState; }, [playState]);
   useEffect(() => { autoStartEnabledRef.current = autoStartEnabled; }, [autoStartEnabled]);
   useEffect(() => { audioThresholdRef.current = audioThreshold; }, [audioThreshold]);
   useEffect(() => { progressRef.current = progress; }, [progress]);
-  useEffect(() => { isScrollingStateRef.current = isScrollingRef.current; }, [isScrollingRef.current]); // Note: relying on ref mutation mostly, but this helps
+  useEffect(() => { isScrollingStateRef.current = isScrollingRef.current; }, [isScrollingRef.current]);
 
-  // Setup Audio Analysis
+  // ----------------------------------------------------------------------
+  // Logic: Voice Commands (Speech Recognition)
+  // ----------------------------------------------------------------------
+  useEffect(() => {
+    if (!voiceControlEnabled) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+      return;
+    }
+
+    const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionClass) {
+      console.error("Browser does not support Speech Recognition");
+      setMicError(true);
+      setVoiceControlEnabled(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognitionClass();
+    recognition.lang = 'de-DE';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const lastIndex = event.results.length - 1;
+      const transcript = event.results[lastIndex][0].transcript.trim().toLowerCase();
+      console.log("Voice Command heard:", transcript);
+      
+      handleVoiceCommand(transcript);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error);
+      if (event.error === 'not-allowed') {
+        setMicError(true);
+        setVoiceControlEnabled(false);
+      }
+    };
+
+    // Restart if it stops unexpectedly (common in Web Speech API)
+    recognition.onend = () => {
+      if (voiceControlEnabled && recognitionRef.current) {
+        try {
+          recognition.start();
+        } catch (e) {
+          // Already started or other error
+        }
+      }
+    };
+
+    try {
+      recognition.start();
+      recognitionRef.current = recognition;
+    } catch (e) {
+      console.error("Failed to start recognition", e);
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    };
+  }, [voiceControlEnabled]);
+
+  const handleVoiceCommand = (text: string) => {
+    let commandFound = false;
+    let feedback = "";
+
+    // Play
+    if (text.includes("start") || text.includes("los") || text.includes("play") || text.includes("weiter")) {
+      setPlayState(PlayState.PLAYING);
+      feedback = "PLAY";
+      commandFound = true;
+    }
+    // Pause/Stop
+    else if (text.includes("stopp") || text.includes("stop") || text.includes("halt") || text.includes("pause") || text.includes("warte")) {
+      audioCooldownRef.current = Date.now() + 2000;
+      triggerConfidenceCounterRef.current = 0; // Reset Trigger logic
+      setPlayState(PlayState.PAUSED);
+      feedback = "PAUSE";
+      commandFound = true;
+    }
+    // Reset
+    else if (text.includes("anfang") || text.includes("zurück") || text.includes("reset")) {
+      handleReset();
+      feedback = "RESET";
+      commandFound = true;
+    }
+    // Speed Up
+    else if (text.includes("schneller")) {
+      setScrollSpeed(prev => Math.min(15, prev + 0.5));
+      feedback = "SCHNELLER";
+      commandFound = true;
+    }
+    // Slow Down
+    else if (text.includes("langsamer")) {
+      setScrollSpeed(prev => Math.max(0.5, prev - 0.5));
+      feedback = "LANGSAMER";
+      commandFound = true;
+    }
+    // Exit
+    else if (text.includes("ende") || text.includes("schließen") || text.includes("raus")) {
+      onExit();
+      commandFound = true;
+    }
+
+    if (commandFound) {
+      setLastVoiceCommand(feedback);
+      setTimeout(() => setLastVoiceCommand(null), 2000);
+    }
+  };
+
+
+  // ----------------------------------------------------------------------
+  // Logic: Audio Volume Trigger (Auto-Start)
+  // ----------------------------------------------------------------------
   useEffect(() => {
     if (!autoStartEnabled) {
       cleanupAudio();
+      setIsListening(false);
       return;
     }
 
@@ -72,7 +239,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         audioContextRef.current = audioCtx;
 
         const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 512; // Higher resolution for time domain
+        analyser.fftSize = 512; 
         analyserRef.current = analyser;
 
         const microphone = audioCtx.createMediaStreamSource(stream);
@@ -110,65 +277,71 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const analyzeAudio = () => {
     if (!analyserRef.current) return;
 
-    // Use TimeDomainData for better volume (loudness) detection than FrequencyData
     const bufferLength = analyserRef.current.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     analyserRef.current.getByteTimeDomainData(dataArray);
 
-    // Calculate RMS (Root Mean Square)
+    // Calculate RMS
     let sum = 0;
     for (let i = 0; i < bufferLength; i++) {
-      const x = (dataArray[i] - 128) / 128.0; // Normalize to -1..1
+      const x = (dataArray[i] - 128) / 128.0; 
       sum += x * x;
     }
     const rms = Math.sqrt(sum / bufferLength);
-    
-    // Map RMS to 0-100. RMS of 0.25 is quite loud music.
-    // Scaling factor 350 feels natural for "loud music" hitting 80-90%
     let volume = Math.min(100, rms * 350); 
 
-    // Update visual state occasionally
-    setCurrentAudioLevel(prev => {
-        // Smooth falloff for visual
-        return volume > prev ? volume : prev * 0.92;
-    });
+    setCurrentAudioLevel(prev => volume > prev ? volume : prev * 0.92);
 
     // Trigger Logic
     const now = Date.now();
     const isCooldownActive = now < audioCooldownRef.current;
-    // Don't auto-start if song is effectively finished (>95%)
-    const isAtEnd = progressRef.current > 0.95; 
+    const isAtEnd = progressRef.current > 0.99; // Only disable at very end
     const isTouching = isScrollingRef.current;
+    const isNotPlaying = playStateRef.current !== PlayState.PLAYING;
+    
+    // Update listening state for UI
+    if (autoStartEnabledRef.current && isNotPlaying && !isAtEnd && !isTouching) {
+       // We are theoretically listening, but check cooldown
+       if (isCooldownActive) {
+          // Technically listening but blocked
+       } else {
+          // Active listening
+       }
+    }
 
     if (
         autoStartEnabledRef.current && 
-        playStateRef.current !== PlayState.PLAYING && 
+        isNotPlaying && 
         !isCooldownActive &&
         !isAtEnd &&
         !isTouching
     ) {
+        // Only show listening active if not in cooldown
+        if (!isListening) setIsListening(true);
+
         if (volume > audioThresholdRef.current) {
              triggerConfidenceCounterRef.current += 1;
         } else {
-             // Decay confidence quickly but not instantly to allow for tiny gaps
-             triggerConfidenceCounterRef.current = Math.max(0, triggerConfidenceCounterRef.current - 2);
+             // Slower decay to allow for breathing pauses in singing before start
+             triggerConfidenceCounterRef.current = Math.max(0, triggerConfidenceCounterRef.current - 1);
         }
 
-        // Only trigger if we have sustained volume for X frames
         if (triggerConfidenceCounterRef.current >= REQUIRED_CONFIDENCE_FRAMES) {
-            console.log("Audio Triggered Start! Volume:", volume, "Confidence:", triggerConfidenceCounterRef.current);
             setPlayState(PlayState.PLAYING);
-            triggerConfidenceCounterRef.current = 0; // Reset
+            triggerConfidenceCounterRef.current = 0; 
+            setIsListening(false);
         }
     } else {
-        // Reset confidence if we are playing or in cooldown
+        if (isListening) setIsListening(false);
         triggerConfidenceCounterRef.current = 0;
     }
     
     audioFrameRef.current = requestAnimationFrame(analyzeAudio);
   };
 
-  // Handle scrolling logic
+  // ----------------------------------------------------------------------
+  // Logic: Scrolling Animation
+  // ----------------------------------------------------------------------
   const animate = useCallback((time: number) => {
     if (playState !== PlayState.PLAYING || !scrollerRef.current) {
       lastTimeRef.current = 0;
@@ -232,14 +405,13 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       defaultScrollSpeed: scrollSpeed, 
       fontSize,
       autoStartEnabled,
-      audioThreshold
+      audioThreshold,
+      voiceControlEnabled
     });
-  }, [scrollSpeed, fontSize, autoStartEnabled, audioThreshold, song.id, onUpdateSongSettings]);
+  }, [scrollSpeed, fontSize, autoStartEnabled, audioThreshold, voiceControlEnabled, song.id, onUpdateSongSettings]);
 
   const handleReset = () => {
-    // Add cooldown here too, otherwise hitting reset during a loud intro 
-    // will cause immediate restart.
-    audioCooldownRef.current = Date.now() + 2000;
+    audioCooldownRef.current = Date.now() + 1000; // Short cooldown on reset
     setPlayState(PlayState.STOPPED);
     triggerConfidenceCounterRef.current = 0;
     
@@ -252,12 +424,13 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const togglePlay = () => {
     setPlayState(prev => {
         if (prev === PlayState.PLAYING) {
-            // If pausing manually, set a cooldown so microphone doesn't immediately restart it
-            // if the environment is loud.
-            audioCooldownRef.current = Date.now() + 2000; 
-            console.log("Paused manually. Audio trigger cooldown active.");
+            // Manual pause: Set cooldown (1.5s) and RESET trigger logic
+            // This ensures it doesn't accidentally restart immediately if volume is high
+            audioCooldownRef.current = Date.now() + 1500; 
+            triggerConfidenceCounterRef.current = 0;
             return PlayState.PAUSED;
         }
+        // Manual start
         return PlayState.PLAYING;
     });
   };
@@ -300,6 +473,21 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
            <p className="text-slate-400 text-sm truncate">{song.artist}</p>
         </div>
       </div>
+
+      {/* Visual Feedback for Voice Command */}
+      {lastVoiceCommand && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 bg-cyan-500/90 text-black px-6 py-2 rounded-full font-bold animate-pulse shadow-[0_0_20px_rgba(6,182,212,0.6)] backdrop-blur">
+           {lastVoiceCommand}
+        </div>
+      )}
+      
+      {/* Visual Feedback for AutoStart Listening */}
+      {isListening && !lastVoiceCommand && (
+         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-green-900/80 text-green-100 border border-green-500/30 px-4 py-1 rounded-full text-xs font-bold flex items-center gap-2 backdrop-blur animate-pulse">
+           <Ear className="w-3 h-3" />
+           Hört zu...
+        </div>
+      )}
 
       {/* Main Content Area */}
       <div 
@@ -375,29 +563,36 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
               />
             </div>
 
-             {/* Auto-Start Audio Control */}
-             <div className="flex flex-col gap-2">
-               <div className="flex justify-between items-center mb-1">
+            {/* Audio Controls Container */}
+            <div className="flex flex-col gap-3">
+               {/* Auto-Start Audio Control */}
+               <div className="flex items-center gap-2">
                  <button 
                     onClick={() => setAutoStartEnabled(!autoStartEnabled)}
-                    className={`flex items-center gap-1 text-xs font-semibold uppercase tracking-wider px-2 py-1 rounded transition-colors ${autoStartEnabled ? 'bg-cyan-900 text-cyan-300 border border-cyan-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
+                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${autoStartEnabled ? 'bg-cyan-900 text-cyan-300 border border-cyan-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
                  >
-                    {autoStartEnabled ? <Mic className="w-3 h-3" /> : <MicOff className="w-3 h-3" />}
+                    {autoStartEnabled ? <Activity className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-50" />}
                     {autoStartEnabled ? "Auto-Start An" : "Auto-Start Aus"}
                  </button>
-                 {autoStartEnabled && <span className="text-xs text-cyan-400">{audioThreshold} %</span>}
+                 
+                 <button 
+                    onClick={() => setVoiceControlEnabled(!voiceControlEnabled)}
+                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
+                 >
+                    {voiceControlEnabled ? <Speech className="w-3 h-3" /> : <MicOff className="w-3 h-3 opacity-50" />}
+                    Voice Cmd
+                 </button>
                </div>
                
+               {/* Audio Threshold Visualizer (Only if AutoStart is on) */}
                {autoStartEnabled ? (
-                 <div className="relative w-full h-8 flex items-center">
-                    {/* Background Level Indicator */}
-                    <div className="absolute left-0 top-1/2 -translate-y-1/2 h-2 bg-slate-800 w-full rounded overflow-hidden">
+                 <div className="relative w-full h-6 flex items-center">
+                    <div className="absolute left-0 top-1/2 -translate-y-1/2 h-1.5 bg-slate-800 w-full rounded overflow-hidden">
                        <div 
-                          className={`h-full transition-all duration-75 ${currentAudioLevel > audioThreshold ? 'bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.8)]' : 'bg-green-500'}`}
+                          className={`h-full transition-all duration-75 ${currentAudioLevel > audioThreshold ? 'bg-cyan-400' : 'bg-green-500'}`}
                           style={{ width: `${currentAudioLevel}%`, opacity: 0.8 }}
                        />
                     </div>
-                    {/* Threshold Slider */}
                     <input 
                       type="range" 
                       min="1" 
@@ -406,21 +601,22 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
                       value={audioThreshold ?? 20} 
                       onChange={(e) => setAudioThreshold(parseInt(e.target.value))}
                       className="absolute w-full h-8 top-0 opacity-0 cursor-pointer z-20"
-                      title="Schwellenwert einstellen"
                     />
-                     {/* Visual Thumb for Threshold */}
                      <div 
-                        className="absolute w-4 h-4 bg-white rounded-full shadow border border-slate-300 pointer-events-none z-10 top-1/2 -translate-y-1/2 -ml-2"
+                        className="absolute w-3 h-3 bg-white rounded-full shadow border border-slate-300 pointer-events-none z-10 top-1/2 -translate-y-1/2 -ml-1.5"
                         style={{ left: `${audioThreshold}%` }}
                      />
                  </div>
+               ) : voiceControlEnabled ? (
+                  <div className="h-6 flex items-center justify-center gap-2">
+                    <Zap className="w-3 h-3 text-purple-400 animate-pulse" />
+                    <span className="text-[10px] text-purple-300">Sage "Start", "Stopp" oder "Schneller"</span>
+                  </div>
                ) : (
-                 <div className="h-8 flex items-center justify-center text-xs text-slate-600 bg-slate-900/50 rounded border border-slate-800">
-                    <Activity className="w-3 h-3 mr-2" />
-                    Audio deaktiviert
-                 </div>
+                 <div className="h-6"></div>
                )}
-               {micError && <span className="text-[10px] text-red-400">Mikrofon nicht verfügbar</span>}
+               
+               {micError && <span className="text-[10px] text-red-400 text-center -mt-1">Mikrofon Zugriff verweigert</span>}
             </div>
         </div>
 

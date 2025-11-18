@@ -25,7 +25,8 @@ export const SongEditor: React.FC<SongEditorProps> = ({ existingSong, onSave, on
       fontSize: existingSong?.fontSize || 42,
       // Default settings for new songs
       autoStartEnabled: existingSong?.autoStartEnabled ?? true,
-      audioThreshold: existingSong?.audioThreshold ?? 20
+      audioThreshold: existingSong?.audioThreshold ?? 20,
+      voiceControlEnabled: existingSong?.voiceControlEnabled ?? false
     };
     onSave(newSong);
   };
