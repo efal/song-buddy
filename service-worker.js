@@ -1,4 +1,4 @@
-const CACHE_NAME = 'song-buddy-v5-offline-fix';
+const CACHE_NAME = 'song-buddy-v6-offline-fix';
 
 // Lokale Dateien, die statisch vorhanden sind
 const LOCAL_ASSETS = [

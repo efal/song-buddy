@@ -44,9 +44,12 @@
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-          // Use a relative path. The browser resolves this relative to the current document location,
-          // which is robust across different hosting environments and avoids origin mismatch errors.
-          navigator.serviceWorker.register('./service-worker.js')
+          // FIX: Construct absolute URL based on window.location to ignore any <base> tags 
+          // injected by the environment (which cause Origin Mismatch errors).
+          const swUrl = new URL('service-worker.js', window.location.href).href;
+          console.log('Attempting to register SW at:', swUrl);
+
+          navigator.serviceWorker.register(swUrl)
             .then(reg => {
               console.log('SW registered on:', reg.scope);
               // Check for updates
