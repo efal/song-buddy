@@ -51,6 +51,7 @@ interface PrompterProps {
 
 export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSettings }) => {
   const [playState, setPlayState] = useState<PlayState>(PlayState.STOPPED);
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
   
   // Initialize with fallbacks
   const [scrollSpeed, setScrollSpeed] = useState(song.defaultScrollSpeed ?? 2.0);
@@ -62,14 +63,14 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const [isListening, setIsListening] = useState(false); // Visual state for UI
   
   // Voice Command State
-  const [voiceControlEnabled, setVoiceControlEnabled] = useState(song.voiceControlEnabled ?? false);
+  // CRITICAL FIX: Force disable voice control on init if offline to prevent startup hang
+  const [voiceControlEnabled, setVoiceControlEnabled] = useState((song.voiceControlEnabled && navigator.onLine) ?? false);
   const [lastVoiceCommand, setLastVoiceCommand] = useState<string | null>(null);
   
   const [progress, setProgress] = useState(0);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [currentAudioLevel, setCurrentAudioLevel] = useState(0);
   const [micError, setMicError] = useState(false);
-  const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const animationFrameRef = useRef<number>(0);
@@ -106,9 +107,12 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
   // Monitor Online/Offline status
   useEffect(() => {
-    const handleOnline = () => setIsOffline(false);
+    const handleOnline = () => {
+        setIsOffline(false);
+    };
     const handleOffline = () => {
       setIsOffline(true);
+      // Force disable voice control if network drops
       if (voiceControlEnabled) {
         setVoiceControlEnabled(false);
         setLastVoiceCommand("Offline: Voice deaktiviert");
@@ -128,18 +132,17 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   // Logic: Voice Commands (Speech Recognition)
   // ----------------------------------------------------------------------
   useEffect(() => {
-    if (!voiceControlEnabled) {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+    // Cleanup previous instance
+    if (recognitionRef.current) {
+        try {
+            recognitionRef.current.stop();
+        } catch(e) { /* ignore */ }
         recognitionRef.current = null;
-      }
-      return;
     }
 
-    // Prevent enabling if offline
-    if (!navigator.onLine) {
-        setVoiceControlEnabled(false);
-        return;
+    // If disabled or offline, do nothing
+    if (!voiceControlEnabled || !navigator.onLine) {
+      return;
     }
 
     const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -164,24 +167,22 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
     };
 
     recognition.onerror = (event: any) => {
-      // Ignore "no-speech" errors, they just mean silence
-      if (event.error !== 'no-speech') {
-          console.error("Speech recognition error", event.error);
-      }
-      
       if (event.error === 'not-allowed') {
         setMicError(true);
         setVoiceControlEnabled(false);
       }
       if (event.error === 'network') {
+        // Specifically handle network errors by disabling the feature
+        console.warn("Network error in speech recognition. Disabling.");
         setIsOffline(true);
         setVoiceControlEnabled(false);
+        setLastVoiceCommand("Netzwerkfehler: Voice aus");
       }
     };
 
-    // Restart if it stops unexpectedly (common in Web Speech API)
     recognition.onend = () => {
-      if (voiceControlEnabled && recognitionRef.current && navigator.onLine) {
+      // Only restart if we are still enabled and online
+      if (voiceControlEnabled && navigator.onLine && recognitionRef.current) {
         try {
           recognition.start();
         } catch (e) {
@@ -195,11 +196,14 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       recognitionRef.current = recognition;
     } catch (e) {
       console.error("Failed to start recognition", e);
+      setVoiceControlEnabled(false);
     }
 
     return () => {
       if (recognitionRef.current) {
-        recognitionRef.current.stop();
+        try {
+            recognitionRef.current.stop();
+        } catch(e) { /* ignore */ }
         recognitionRef.current = null;
       }
     };
@@ -431,7 +435,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       fontSize,
       autoStartEnabled,
       audioThreshold,
-      voiceControlEnabled
+      voiceControlEnabled // Saving this might save "false" if offline, which is acceptable for safety
     });
   }, [scrollSpeed, fontSize, autoStartEnabled, audioThreshold, voiceControlEnabled, song.id, onUpdateSongSettings]);
 

@@ -11,6 +11,10 @@ const getClient = () => {
 };
 
 export const generateLyrics = async (title: string, artist: string): Promise<string> => {
+  if (!navigator.onLine) {
+    return "Fehler: Keine Internetverbindung. Lyrics können nur online abgerufen werden.";
+  }
+
   const client = getClient();
   if (!client) return "Fehler: API Key fehlt.";
 
@@ -32,6 +36,10 @@ export const generateLyrics = async (title: string, artist: string): Promise<str
 };
 
 export const estimateBPMAndMood = async (lyrics: string): Promise<{ speed: number, mood: string }> => {
+  if (!navigator.onLine) {
+    return { speed: 3, mood: 'neutral' };
+  }
+
   const client = getClient();
   if (!client) return { speed: 3, mood: 'neutral' };
 
