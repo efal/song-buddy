@@ -1,0 +1,8 @@
+{
+  "name": "Song Buddy-3",
+  "description": "Ein intelligenter Teleprompter für Sänger. Verwalten Sie Ihre Setlist, nutzen Sie AI für Songtexte und performen Sie mit anpassbarem Auto-Scroll. Offline-fähig.",
+  "theme_color": "#020617",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
