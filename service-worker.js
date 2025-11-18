@@ -1,4 +1,4 @@
-const CACHE_NAME = 'song-buddy-v13-pwa-fix';
+const CACHE_NAME = 'song-buddy-v19-protocol-fix';
 
 // Lokale Dateien, die statisch vorhanden sind
 const LOCAL_ASSETS = [

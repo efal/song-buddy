@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Song, PlayState } from '../types';
-import { Play, Pause, RotateCcw, ArrowLeft, Type, Gauge, Mic, MicOff, Activity, Speech, Zap, Ear } from 'lucide-react';
+import { Play, Pause, RotateCcw, ArrowLeft, Type, Gauge, Mic, MicOff, Activity, Speech, Zap, Ear, WifiOff } from 'lucide-react';
 
 // Typ-Definitionen für Speech Recognition (noch experimentell in Browsern)
 interface SpeechRecognitionEvent extends Event {
@@ -69,9 +69,10 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const [controlsVisible, setControlsVisible] = useState(true);
   const [currentAudioLevel, setCurrentAudioLevel] = useState(0);
   const [micError, setMicError] = useState(false);
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const animationFrameRef = useRef<number>();
+  const animationFrameRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const isScrollingRef = useRef(false);
@@ -80,7 +81,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const microphoneRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const audioFrameRef = useRef<number>();
+  const audioFrameRef = useRef<number>(0);
   
   // Voice Command Ref
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -103,6 +104,26 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   useEffect(() => { progressRef.current = progress; }, [progress]);
   useEffect(() => { isScrollingStateRef.current = isScrollingRef.current; }, [isScrollingRef.current]);
 
+  // Monitor Online/Offline status
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => {
+      setIsOffline(true);
+      if (voiceControlEnabled) {
+        setVoiceControlEnabled(false);
+        setLastVoiceCommand("Offline: Voice deaktiviert");
+        setTimeout(() => setLastVoiceCommand(null), 3000);
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [voiceControlEnabled]);
+
   // ----------------------------------------------------------------------
   // Logic: Voice Commands (Speech Recognition)
   // ----------------------------------------------------------------------
@@ -113,6 +134,12 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         recognitionRef.current = null;
       }
       return;
+    }
+
+    // Prevent enabling if offline
+    if (!navigator.onLine) {
+        setVoiceControlEnabled(false);
+        return;
     }
 
     const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -137,16 +164,24 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
     };
 
     recognition.onerror = (event: any) => {
-      console.error("Speech recognition error", event.error);
+      // Ignore "no-speech" errors, they just mean silence
+      if (event.error !== 'no-speech') {
+          console.error("Speech recognition error", event.error);
+      }
+      
       if (event.error === 'not-allowed') {
         setMicError(true);
+        setVoiceControlEnabled(false);
+      }
+      if (event.error === 'network') {
+        setIsOffline(true);
         setVoiceControlEnabled(false);
       }
     };
 
     // Restart if it stops unexpectedly (common in Web Speech API)
     recognition.onend = () => {
-      if (voiceControlEnabled && recognitionRef.current) {
+      if (voiceControlEnabled && recognitionRef.current && navigator.onLine) {
         try {
           recognition.start();
         } catch (e) {
@@ -299,16 +334,6 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
     const isTouching = isScrollingRef.current;
     const isNotPlaying = playStateRef.current !== PlayState.PLAYING;
     
-    // Update listening state for UI
-    if (autoStartEnabledRef.current && isNotPlaying && !isAtEnd && !isTouching) {
-       // We are theoretically listening, but check cooldown
-       if (isCooldownActive) {
-          // Technically listening but blocked
-       } else {
-          // Active listening
-       }
-    }
-
     if (
         autoStartEnabledRef.current && 
         isNotPlaying && 
@@ -482,7 +507,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       )}
       
       {/* Visual Feedback for AutoStart Listening */}
-      {isListening && !lastVoiceCommand && (
+      {isListening && !lastVoiceCommand && !isOffline && (
          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-green-900/80 text-green-100 border border-green-500/30 px-4 py-1 rounded-full text-xs font-bold flex items-center gap-2 backdrop-blur animate-pulse">
            <Ear className="w-3 h-3" />
            Hört zu...
@@ -576,11 +601,12 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
                  </button>
                  
                  <button 
-                    onClick={() => setVoiceControlEnabled(!voiceControlEnabled)}
-                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
+                    onClick={() => !isOffline && setVoiceControlEnabled(!voiceControlEnabled)}
+                    disabled={isOffline}
+                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${isOffline ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed' : voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
                  >
-                    {voiceControlEnabled ? <Speech className="w-3 h-3" /> : <MicOff className="w-3 h-3 opacity-50" />}
-                    Voice Cmd
+                    {isOffline ? <WifiOff className="w-3 h-3" /> : voiceControlEnabled ? <Speech className="w-3 h-3" /> : <MicOff className="w-3 h-3 opacity-50" />}
+                    {isOffline ? "Offline" : "Voice Cmd"}
                  </button>
                </div>
                

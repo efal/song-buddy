@@ -38,41 +38,48 @@
   }
 }
 </script>
+<link rel="stylesheet" href="/index.css">
 </head>
   <body class="bg-slate-950 text-slate-200 font-sans antialiased overflow-hidden">
     <div id="root" class="h-screen w-screen flex flex-col"></div>
     <script type="module" src="./index.tsx"></script>
     <script>
       if ('serviceWorker' in navigator) {
-        const registerSW = async () => {
-          try {
-            // Explicitly define scope to ensure start_url in manifest is controlled
-            const reg = await navigator.serviceWorker.register('./service-worker.js', { scope: './' });
-            console.log('SW registered with scope:', reg.scope);
-            
-            reg.onupdatefound = () => {
-              const installingWorker = reg.installing;
-              installingWorker.onstatechange = () => {
-                if (installingWorker.state === 'installed') {
-                  if (navigator.serviceWorker.controller) {
-                    console.log('New content available - refresh needed.');
-                  } else {
-                    console.log('Content cached for offline use.');
-                  }
-                }
-              };
-            };
-          } catch (err) {
-             if (err.message && (err.message.includes('origin') || err.name === 'SecurityError')) {
-                 console.warn('SW Registration skipped: Origin mismatch or preview environment.');
-             } else {
-                 console.error('SW Registration failed:', err);
-             }
+        const registerSW = () => {
+          // Check protocol first. Service Workers cannot be registered from blob: or data: URLs
+          // which are commonly used in code preview environments.
+          if (!window.location.protocol.startsWith('http')) {
+            console.warn('Service Worker registration skipped: Not running on http/https protocol (' + window.location.protocol + ')');
+            return;
           }
+
+          navigator.serviceWorker.register('./service-worker.js')
+            .then(reg => {
+              console.log('SW registered:', reg);
+              reg.onupdatefound = () => {
+                const installingWorker = reg.installing;
+                installingWorker.onstatechange = () => {
+                  if (installingWorker.state === 'installed') {
+                    if (navigator.serviceWorker.controller) {
+                      console.log('New content available - refresh needed.');
+                    } else {
+                      console.log('Content cached for offline use.');
+                    }
+                  }
+                };
+              };
+            })
+            .catch(err => console.error('SW Registration failed:', err));
         };
 
-        window.addEventListener('load', registerSW);
+        // Handle case where load event has already fired
+        if (document.readyState === 'complete') {
+          registerSW();
+        } else {
+          window.addEventListener('load', registerSW);
+        }
       }
     </script>
-  </body>
+  <script type="module" src="/index.tsx"></script>
+</body>
 </html>
