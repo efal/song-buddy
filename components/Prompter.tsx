@@ -52,8 +52,9 @@ interface PrompterProps {
 export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSettings }) => {
   const [playState, setPlayState] = useState<PlayState>(PlayState.STOPPED);
   
-  // Optimistic Offline Status: Default to FALSE (assume online) so UI doesn't flicker or block.
-  // We only set it to true if a check actively fails.
+  // "Lazy Load" Status: Wir warten, bis die UI fertig ist, bevor wir Hardware anfassen.
+  const [isHardwareReady, setIsHardwareReady] = useState(false);
+  
   const [isOffline, setIsOffline] = useState(false);
   const [connectionChecking, setConnectionChecking] = useState(false);
   
@@ -64,8 +65,6 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const [audioThreshold, setAudioThreshold] = useState(song.audioThreshold ?? 20);
   const [isListening, setIsListening] = useState(false); 
   
-  // Optimistic Voice Control: If enabled in song, start enabled. 
-  // We do not wait for a ping check.
   const [voiceControlEnabled, setVoiceControlEnabled] = useState(song.voiceControlEnabled ?? false);
   const [lastVoiceCommand, setLastVoiceCommand] = useState<string | null>(null);
   
@@ -104,15 +103,30 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   useEffect(() => { isScrollingStateRef.current = isScrollingRef.current; }, [isScrollingRef.current]);
 
   // ----------------------------------------------------------------------
-  // Logic: Background Connectivity Check (Non-Blocking)
+  // 1. SAFETY STARTUP: Delay Hardware access until UI is rendered
+  // ----------------------------------------------------------------------
+  useEffect(() => {
+    // Wir warten 1 Sekunde nach dem Laden der Komponente.
+    // Das gibt dem Browser Zeit, das UI zu zeichnen, bevor er durch Hardware-Checks blockiert wird.
+    const timer = setTimeout(() => {
+        setIsHardwareReady(true);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // ----------------------------------------------------------------------
+  // 2. Connectivity Check
   // ----------------------------------------------------------------------
   const checkRealConnection = useCallback(async () => {
+    // Don't check network immediately to avoid blocking fetch on mount
+    if (!isHardwareReady) return;
+
     setConnectionChecking(true);
     try {
       const controller = new AbortController();
-      // Very short timeout (1.5s) to avoid hanging background tasks
       const timeoutId = setTimeout(() => controller.abort(), 1500);
       
+      // Ping a small file
       await fetch('https://cdn.tailwindcss.com', { 
         method: 'HEAD', 
         mode: 'no-cors',
@@ -123,44 +137,41 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       clearTimeout(timeoutId);
       setIsOffline(false);
       setConnectionChecking(false);
-      return true;
     } catch (e) {
-      // Only set offline if we actively fail
       setIsOffline(true);
       setConnectionChecking(false);
-      return false;
     }
-  }, []);
+  }, [isHardwareReady]);
 
-  // Passive check on mount - does not block UI
   useEffect(() => {
-    checkRealConnection();
-    
-    const handleOnline = () => { setIsOffline(false); checkRealConnection(); };
-    const handleOffline = () => setIsOffline(true);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [checkRealConnection]);
+    if (isHardwareReady) {
+        checkRealConnection();
+        const handleOnline = () => { setIsOffline(false); checkRealConnection(); };
+        const handleOffline = () => setIsOffline(true);
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        return () => {
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+        };
+    }
+  }, [checkRealConnection, isHardwareReady]);
 
   // ----------------------------------------------------------------------
-  // Logic: Voice Commands (Optimistic Start)
+  // 3. Voice Commands (Lazy Load)
   // ----------------------------------------------------------------------
   useEffect(() => {
+    // Guard: Only run if hardware is "unlocked" and safe
+    if (!isHardwareReady) return;
+
     if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch(e) {}
         recognitionRef.current = null;
     }
 
-    // If explicitly disabled by user or we KNOW we are offline, don't try.
-    if (!voiceControlEnabled) {
-      return;
-    }
+    if (!voiceControlEnabled) return;
 
+    // Safety Check for Browser Support
     const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionClass) {
       setMicError(true);
@@ -168,45 +179,43 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       return;
     }
 
-    const recognition = new SpeechRecognitionClass();
-    recognition.lang = 'de-DE';
-    recognition.continuous = true;
-    recognition.interimResults = false;
-
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const lastIndex = event.results.length - 1;
-      const transcript = event.results[lastIndex][0].transcript.trim().toLowerCase();
-      console.log("Voice Command:", transcript);
-      handleVoiceCommand(transcript);
-    };
-
-    recognition.onerror = (event: any) => {
-      // This is where we handle the "Offline" reality.
-      // If the browser says "network error", we THEN disable it.
-      if (event.error === 'network') {
-        console.warn("Voice Control: Network error detected.");
-        setIsOffline(true);
-        setVoiceControlEnabled(false); // Disable gracefully
-        setLastVoiceCommand("Offline: Voice deaktiviert");
-      } else if (event.error === 'not-allowed') {
-        setMicError(true);
-        setVoiceControlEnabled(false);
-      }
-    };
-
-    recognition.onend = () => {
-      if (voiceControlEnabled && !isOffline && recognitionRef.current) {
-        try { recognition.start(); } catch (e) {}
-      }
-    };
-
+    // Try-Catch block for instantiation to prevent crashes on old Android WebViews
     try {
-      // Try to start. If it throws immediately (e.g. complete loss of signal), catch it.
-      recognition.start();
-      recognitionRef.current = recognition;
+        const recognition = new SpeechRecognitionClass();
+        recognition.lang = 'de-DE';
+        recognition.continuous = true;
+        recognition.interimResults = false;
+
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+          const lastIndex = event.results.length - 1;
+          const transcript = event.results[lastIndex][0].transcript.trim().toLowerCase();
+          console.log("Voice Command:", transcript);
+          handleVoiceCommand(transcript);
+        };
+
+        recognition.onerror = (event: any) => {
+          if (event.error === 'network') {
+            // Silent fail on network error to keep UI responsive
+            setIsOffline(true);
+            setVoiceControlEnabled(false);
+            setLastVoiceCommand("Voice Offline");
+          } else if (event.error === 'not-allowed') {
+            setMicError(true);
+            setVoiceControlEnabled(false);
+          }
+        };
+
+        recognition.onend = () => {
+          if (voiceControlEnabled && !isOffline && recognitionRef.current) {
+            try { recognition.start(); } catch (e) {}
+          }
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
     } catch (e) {
-      console.error("Failed to start recognition", e);
-      setVoiceControlEnabled(false);
+        console.warn("Speech Recognition Init Failed:", e);
+        setVoiceControlEnabled(false);
     }
 
     return () => {
@@ -215,7 +224,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         recognitionRef.current = null;
       }
     };
-  }, [voiceControlEnabled, isOffline]);
+  }, [voiceControlEnabled, isOffline, isHardwareReady]);
 
   const handleVoiceCommand = (text: string) => {
     let commandFound = false;
@@ -261,9 +270,12 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
 
   // ----------------------------------------------------------------------
-  // Logic: Audio Volume Trigger (Auto-Start) - No changes needed
+  // 4. Audio Volume Trigger (Lazy Load)
   // ----------------------------------------------------------------------
   useEffect(() => {
+    // Guard: Wait for hardware ready state
+    if (!isHardwareReady) return;
+
     if (!autoStartEnabled) {
       cleanupAudio();
       setIsListening(false);
@@ -289,16 +301,20 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
         analyzeAudio();
       } catch (err) {
-        console.error("Microphone access denied or error", err);
+        console.error("Microphone error", err);
         setMicError(true);
         setAutoStartEnabled(false); 
       }
     };
 
-    initAudio();
+    // Short delay before actually asking for mic to ensure no conflict with speech engine
+    const micTimeout = setTimeout(initAudio, 500);
 
-    return cleanupAudio;
-  }, [autoStartEnabled]);
+    return () => {
+        clearTimeout(micTimeout);
+        cleanupAudio();
+    };
+  }, [autoStartEnabled, isHardwareReady]);
 
   const cleanupAudio = () => {
     if (audioFrameRef.current) cancelAnimationFrame(audioFrameRef.current);
@@ -356,7 +372,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   };
 
   // ----------------------------------------------------------------------
-  // Logic: Scrolling Animation - No changes needed
+  // Animation Logic (Runs immediately, not dependent on hardware)
   // ----------------------------------------------------------------------
   const animate = useCallback((time: number) => {
     if (playState !== PlayState.PLAYING || !scrollerRef.current) {
@@ -556,16 +572,21 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
             <div className="flex flex-col gap-3">
                <div className="flex items-center gap-2">
                  <button 
+                    disabled={!isHardwareReady}
                     onClick={() => setAutoStartEnabled(!autoStartEnabled)}
-                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${autoStartEnabled ? 'bg-cyan-900 text-cyan-300 border border-cyan-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
+                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${
+                      !isHardwareReady ? 'opacity-50 cursor-not-allowed' : 
+                      autoStartEnabled ? 'bg-cyan-900 text-cyan-300 border border-cyan-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
                  >
                     {autoStartEnabled ? <Activity className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-50" />}
                     {autoStartEnabled ? "Auto-Start An" : "Auto-Start Aus"}
                  </button>
                  
                  <button 
+                    disabled={!isHardwareReady}
                     onClick={() => setVoiceControlEnabled(!voiceControlEnabled)}
                     className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${
+                        !isHardwareReady ? 'opacity-50 cursor-not-allowed' :
                         connectionChecking ? 'bg-slate-800 text-yellow-400 border border-yellow-700/30 animate-pulse' :
                         voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 
                         'bg-slate-800 text-slate-400 border border-slate-700'
