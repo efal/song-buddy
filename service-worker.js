@@ -1,6 +1,6 @@
-const CACHE_NAME = 'song-buddy-v19-protocol-fix';
+const CACHE_NAME = 'song-buddy-v25-bundle-fix';
 
-// Lokale Dateien, die statisch vorhanden sind
+// 1. Lokale Dateien (App Code)
 const LOCAL_ASSETS = [
   './',
   './index.html',
@@ -15,116 +15,104 @@ const LOCAL_ASSETS = [
   './services/gemini.ts'
 ];
 
-// Externe Bibliotheken (CDNs)
-const EXTERNAL_LIB_ASSETS = [
+// 2. EXTERNE BIBLIOTHEKEN (Bundles)
+// Diese URLs müssen exakt 1:1 mit der importmap in index.html übereinstimmen.
+// Wir nutzen ?bundle Versionen, damit wir nur EINE Datei pro Lib cachen müssen.
+const EXTERNAL_LIBS = [
   'https://cdn.tailwindcss.com',
-  'https://aistudiocdn.com/react@^19.2.0',
-  'https://aistudiocdn.com/react@^19.2.0/jsx-runtime',
-  'https://aistudiocdn.com/react-dom@^19.2.0',
-  'https://aistudiocdn.com/react-dom@^19.2.0/client',
-  'https://aistudiocdn.com/lucide-react@^0.554.0',
-  'https://aistudiocdn.com/@google/genai@^1.30.0'
+  'https://esm.sh/react@18.2.0?bundle',
+  'https://esm.sh/react-dom@18.2.0/client?bundle',
+  'https://esm.sh/react-dom@18.2.0?bundle',
+  'https://esm.sh/lucide-react@0.292.0?bundle',
+  'https://esm.sh/@google/genai@0.1.1?bundle'
 ];
 
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
+  self.skipWaiting(); // Sofort aktivieren, keine Wartezeit
   
   event.waitUntil(
     caches.open(CACHE_NAME).then(async (cache) => {
-      console.log('[SW] Caching Local Assets...');
-      await cache.addAll(LOCAL_ASSETS);
+      console.log('[SW] Installing... Downloading offline bundles.');
       
-      console.log('[SW] Caching External Libs...');
-      const externalPromises = EXTERNAL_LIB_ASSETS.map(url => 
-        fetch(url, { mode: 'cors' })
-          .then(response => {
-             if (response.ok) return cache.put(url, response);
-             return Promise.resolve();
+      // Wir laden ALLES herunter. Wenn das Internet beim Installieren da ist,
+      // haben wir danach eine garantierte Offline-Version.
+      try {
+        // Kombiniere Listen
+        const urlsToCache = [...LOCAL_ASSETS, ...EXTERNAL_LIBS];
+        
+        // Request für jeden URL erstellen und cachen
+        // Wir nutzen {cache: 'reload'}, um sicherzustellen, dass wir nicht
+        // versehentlich kaputte Versionen aus dem Browser-Cache holen.
+        await Promise.all(
+          urlsToCache.map(url => {
+            const request = new Request(url, { mode: 'cors' });
+            return fetch(request).then(response => {
+              if (!response.ok) throw new Error(`Failed to fetch ${url}`);
+              return cache.put(request, response);
+            });
           })
-          .catch(e => console.warn(`[SW] Failed to cache external lib: ${url}`, e))
-      );
-      
-      await Promise.allSettled(externalPromises);
+        );
+        
+        console.log('[SW] Installation complete. App is offline ready.');
+      } catch (error) {
+        console.error('[SW] Offline Installation failed:', error);
+        // Trotzdem weitermachen, vielleicht sind Teile schon da
+      }
     })
   );
 });
 
 self.addEventListener('activate', (event) => {
-  console.log('[SW] Activating new version...');
+  console.log('[SW] Activating version:', CACHE_NAME);
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
           if (cacheName !== CACHE_NAME) {
-            console.log('[SW] Deleting old cache:', cacheName);
+            console.log('[SW] Cleaning old cache:', cacheName);
             return caches.delete(cacheName);
           }
         })
       );
-    }).then(() => self.clients.claim())
+    }).then(() => self.clients.claim()) // Sofort Kontrolle über alle Tabs übernehmen
   );
 });
 
 self.addEventListener('fetch', (event) => {
-  // Nur http(s) Requests behandeln
-  if (!event.request.url.startsWith('http')) {
-    return;
-  }
+  const url = new URL(event.request.url);
 
-  let url;
-  try {
-    url = new URL(event.request.url);
-  } catch (error) {
-    return;
-  }
-
-  // API Calls ignorieren
-  if (url.hostname.includes('generativelanguage.googleapis.com')) {
+  // Strategie: CACHE FIRST (Aggressiv)
+  // Wir schauen IMMER erst im Cache nach. Nur wenn da nichts ist, gehen wir ins Netz.
+  // Das garantiert, dass die App offline funktioniert, solange der Cache intakt ist.
+  
+  // Ausnahme: API Calls (Gemini) gehen immer ins Netz
+  if (url.hostname.includes('googleapis.com')) {
     return; 
   }
 
-  // Strategy: Cache First, falling back to Network (für Libs)
-  if (EXTERNAL_LIB_ASSETS.includes(event.request.url) || 
-      url.hostname === 'aistudiocdn.com' || 
-      url.hostname === 'cdn.tailwindcss.com') {
+  event.respondWith(
+    caches.match(event.request).then((cachedResponse) => {
+      if (cachedResponse) {
+        return cachedResponse;
+      }
       
-    event.respondWith(
-      caches.match(event.request).then((cachedResponse) => {
-        if (cachedResponse) {
-          return cachedResponse;
-        }
-        return fetch(event.request)
-          .then((networkResponse) => {
-             if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === 'error') {
-               return networkResponse;
-             }
+      // Nicht im Cache? Versuch es übers Netz.
+      return fetch(event.request)
+        .then(networkResponse => {
+          // Wenn wir erfolgreich was geladen haben (und es kein API call war),
+          // legen wir es für die Zukunft in den Cache.
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
              const responseToCache = networkResponse.clone();
-             caches.open(CACHE_NAME).then((cache) => {
+             caches.open(CACHE_NAME).then(cache => {
                cache.put(event.request, responseToCache);
              });
-             return networkResponse;
-          })
-          .catch(() => new Response('Offline: Library missing', { status: 503 }));
-      })
-    );
-    return;
-  }
-
-  // Strategy: Stale-While-Revalidate or Network First for local app files
-  if (url.origin === self.location.origin) {
-    event.respondWith(
-      caches.match(event.request).then((response) => {
-        // Return cached response immediately if available
-        if (response) return response;
-        
-        // Fallback to network
-        return fetch(event.request).catch(() => {
-           // Offline Fallback für Navigation
-           if (event.request.mode === 'navigate') {
-             return caches.match('./index.html') || caches.match('./');
-           }
+          }
+          return networkResponse;
+        })
+        .catch(error => {
+           console.log("[SW] Fetch failed (Offline):", event.request.url);
+           // Hier könnten wir ein Fallback-Bild zurückgeben, wenn nötig.
         });
-      })
-    );
-  }
+    })
+  );
 });
