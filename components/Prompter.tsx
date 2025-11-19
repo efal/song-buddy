@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Song, PlayState } from '../types';
-import { Play, Pause, RotateCcw, ArrowLeft, Type, Gauge, Mic, MicOff, Activity, Speech, Zap, Ear, WifiOff } from 'lucide-react';
+import { Play, Pause, RotateCcw, ArrowLeft, Type, Gauge, Mic, MicOff, Activity, Speech, Zap, Ear, WifiOff, Wifi } from 'lucide-react';
 
 // Typ-Definitionen für Speech Recognition (noch experimentell in Browsern)
 interface SpeechRecognitionEvent extends Event {
@@ -52,6 +52,7 @@ interface PrompterProps {
 export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSettings }) => {
   const [playState, setPlayState] = useState<PlayState>(PlayState.STOPPED);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const [connectionChecking, setConnectionChecking] = useState(false);
   
   // Initialize with fallbacks
   const [scrollSpeed, setScrollSpeed] = useState(song.defaultScrollSpeed ?? 2.0);
@@ -63,8 +64,8 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const [isListening, setIsListening] = useState(false); // Visual state for UI
   
   // Voice Command State
-  // CRITICAL FIX: Force disable voice control on init if offline to prevent startup hang
-  const [voiceControlEnabled, setVoiceControlEnabled] = useState((song.voiceControlEnabled && navigator.onLine) ?? false);
+  // Default to false initially, enable only after connectivity check confirms it's safe
+  const [voiceControlEnabled, setVoiceControlEnabled] = useState(false);
   const [lastVoiceCommand, setLastVoiceCommand] = useState<string | null>(null);
   
   const [progress, setProgress] = useState(0);
@@ -105,19 +106,69 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   useEffect(() => { progressRef.current = progress; }, [progress]);
   useEffect(() => { isScrollingStateRef.current = isScrollingRef.current; }, [isScrollingRef.current]);
 
-  // Monitor Online/Offline status
+  // ----------------------------------------------------------------------
+  // Logic: Robust Connectivity Check (Active Ping)
+  // ----------------------------------------------------------------------
+  const checkRealConnection = useCallback(async () => {
+    if (!navigator.onLine) {
+      setIsOffline(true);
+      return false;
+    }
+
+    setConnectionChecking(true);
+    try {
+      // Try to reach a reliable high-availability CDN (no-cors is enough to check network path)
+      // We use a short timeout to fail fast on "Zombie WiFi"
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      
+      await fetch('https://cdn.tailwindcss.com', { 
+        method: 'HEAD', 
+        mode: 'no-cors',
+        cache: 'no-store',
+        signal: controller.signal 
+      });
+      
+      clearTimeout(timeoutId);
+      setIsOffline(false);
+      setConnectionChecking(false);
+      return true;
+    } catch (e) {
+      console.warn("Connectivity check failed (Zombie WiFi suspected).");
+      setIsOffline(true);
+      setConnectionChecking(false);
+      return false;
+    }
+  }, []);
+
+  // Initial Connection Check on Mount
   useEffect(() => {
-    const handleOnline = () => {
-        setIsOffline(false);
+    const init = async () => {
+      const online = await checkRealConnection();
+      // Only restore user setting if we are truly online
+      if (online && song.voiceControlEnabled) {
+        setVoiceControlEnabled(true);
+      }
     };
+    init();
+  }, []); // Run once on mount
+
+  // Monitor Online/Offline status events
+  useEffect(() => {
+    const handleOnline = async () => {
+        // Don't trust the event blindly, verify with ping
+        const trulyOnline = await checkRealConnection();
+        if (trulyOnline && song.voiceControlEnabled) {
+             setVoiceControlEnabled(true);
+        }
+    };
+
     const handleOffline = () => {
       setIsOffline(true);
-      // Force disable voice control if network drops
-      if (voiceControlEnabled) {
-        setVoiceControlEnabled(false);
-        setLastVoiceCommand("Offline: Voice deaktiviert");
-        setTimeout(() => setLastVoiceCommand(null), 3000);
-      }
+      // Force disable voice control immediately
+      setVoiceControlEnabled(false);
+      setLastVoiceCommand("Offline: Voice deaktiviert");
+      setTimeout(() => setLastVoiceCommand(null), 3000);
     };
 
     window.addEventListener('online', handleOnline);
@@ -126,7 +177,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [voiceControlEnabled]);
+  }, [checkRealConnection, song.voiceControlEnabled]);
 
   // ----------------------------------------------------------------------
   // Logic: Voice Commands (Speech Recognition)
@@ -140,8 +191,9 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         recognitionRef.current = null;
     }
 
-    // If disabled or offline, do nothing
-    if (!voiceControlEnabled || !navigator.onLine) {
+    // CRITICAL SAFETY: If offline (or ping failed), DO NOT attempt to start Speech Recognition.
+    // It can hang the browser thread on mobile devices trying to reach Google servers.
+    if (!voiceControlEnabled || isOffline) {
       return;
     }
 
@@ -182,7 +234,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
     recognition.onend = () => {
       // Only restart if we are still enabled and online
-      if (voiceControlEnabled && navigator.onLine && recognitionRef.current) {
+      if (voiceControlEnabled && !isOffline && recognitionRef.current) {
         try {
           recognition.start();
         } catch (e) {
@@ -207,7 +259,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         recognitionRef.current = null;
       }
     };
-  }, [voiceControlEnabled]);
+  }, [voiceControlEnabled, isOffline]);
 
   const handleVoiceCommand = (text: string) => {
     let commandFound = false;
@@ -435,7 +487,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       fontSize,
       autoStartEnabled,
       audioThreshold,
-      voiceControlEnabled // Saving this might save "false" if offline, which is acceptable for safety
+      voiceControlEnabled // Keep user preference in saved state
     });
   }, [scrollSpeed, fontSize, autoStartEnabled, audioThreshold, voiceControlEnabled, song.id, onUpdateSongSettings]);
 
@@ -497,9 +549,14 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
           <ArrowLeft className="w-6 h-6" />
         </button>
         
-        <div className="text-right pointer-events-auto max-w-[70%]">
-           <h2 className="text-xl font-bold drop-shadow-md text-slate-100 truncate">{song.title}</h2>
-           <p className="text-slate-400 text-sm truncate">{song.artist}</p>
+        <div className="text-right pointer-events-auto max-w-[70%] flex flex-col items-end">
+           <h2 className="text-xl font-bold drop-shadow-md text-slate-100 truncate max-w-full">{song.title}</h2>
+           <p className="text-slate-400 text-sm truncate max-w-full">{song.artist}</p>
+           {isOffline && (
+             <div className="mt-1 flex items-center gap-1 text-[10px] text-orange-400 bg-orange-900/30 px-2 py-0.5 rounded border border-orange-500/20">
+               <WifiOff className="w-3 h-3" /> Offline-Modus
+             </div>
+           )}
         </div>
       </div>
 
@@ -605,12 +662,30 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
                  </button>
                  
                  <button 
-                    onClick={() => !isOffline && setVoiceControlEnabled(!voiceControlEnabled)}
-                    disabled={isOffline}
-                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${isOffline ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed' : voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
+                    onClick={async () => {
+                      if (isOffline) return;
+                      // Manual toggle needs check too
+                      if (!voiceControlEnabled) {
+                         const ok = await checkRealConnection();
+                         if(ok) setVoiceControlEnabled(true);
+                      } else {
+                         setVoiceControlEnabled(false);
+                      }
+                    }}
+                    disabled={isOffline || connectionChecking}
+                    className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${
+                        isOffline ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed' : 
+                        connectionChecking ? 'bg-slate-800 text-yellow-400 border border-yellow-700/30 animate-pulse' :
+                        voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 
+                        'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}
                  >
-                    {isOffline ? <WifiOff className="w-3 h-3" /> : voiceControlEnabled ? <Speech className="w-3 h-3" /> : <MicOff className="w-3 h-3 opacity-50" />}
-                    {isOffline ? "Offline" : "Voice Cmd"}
+                    {isOffline ? <WifiOff className="w-3 h-3" /> : 
+                     connectionChecking ? <Wifi className="w-3 h-3" /> :
+                     voiceControlEnabled ? <Speech className="w-3 h-3" /> : 
+                     <MicOff className="w-3 h-3 opacity-50" />}
+                    
+                    {isOffline ? "Offline" : connectionChecking ? "Prüfe..." : "Voice Cmd"}
                  </button>
                </div>
                
