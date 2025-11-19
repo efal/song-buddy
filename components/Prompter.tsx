@@ -51,21 +51,22 @@ interface PrompterProps {
 
 export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSettings }) => {
   const [playState, setPlayState] = useState<PlayState>(PlayState.STOPPED);
-  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  
+  // Optimistic Offline Status: Default to FALSE (assume online) so UI doesn't flicker or block.
+  // We only set it to true if a check actively fails.
+  const [isOffline, setIsOffline] = useState(false);
   const [connectionChecking, setConnectionChecking] = useState(false);
   
-  // Initialize with fallbacks
   const [scrollSpeed, setScrollSpeed] = useState(song.defaultScrollSpeed ?? 2.0);
   const [fontSize, setFontSize] = useState(song.fontSize ?? 42);
   
-  // Audio Trigger (AutoStart) State
   const [autoStartEnabled, setAutoStartEnabled] = useState(song.autoStartEnabled ?? true);
   const [audioThreshold, setAudioThreshold] = useState(song.audioThreshold ?? 20);
-  const [isListening, setIsListening] = useState(false); // Visual state for UI
+  const [isListening, setIsListening] = useState(false); 
   
-  // Voice Command State
-  // Default to false initially, enable only after connectivity check confirms it's safe
-  const [voiceControlEnabled, setVoiceControlEnabled] = useState(false);
+  // Optimistic Voice Control: If enabled in song, start enabled. 
+  // We do not wait for a ping check.
+  const [voiceControlEnabled, setVoiceControlEnabled] = useState(song.voiceControlEnabled ?? false);
   const [lastVoiceCommand, setLastVoiceCommand] = useState<string | null>(null);
   
   const [progress, setProgress] = useState(0);
@@ -79,16 +80,13 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const isScrollingRef = useRef(false);
   
-  // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const microphoneRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioFrameRef = useRef<number>(0);
   
-  // Voice Command Ref
   const recognitionRef = useRef<SpeechRecognition | null>(null);
 
-  // State Refs for loops
   const playStateRef = useRef(playState);
   const autoStartEnabledRef = useRef(autoStartEnabled);
   const audioThresholdRef = useRef(audioThreshold);
@@ -99,7 +97,6 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   
   const REQUIRED_CONFIDENCE_FRAMES = 10;
 
-  // Sync refs with state
   useEffect(() => { playStateRef.current = playState; }, [playState]);
   useEffect(() => { autoStartEnabledRef.current = autoStartEnabled; }, [autoStartEnabled]);
   useEffect(() => { audioThresholdRef.current = audioThreshold; }, [audioThreshold]);
@@ -107,20 +104,14 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   useEffect(() => { isScrollingStateRef.current = isScrollingRef.current; }, [isScrollingRef.current]);
 
   // ----------------------------------------------------------------------
-  // Logic: Robust Connectivity Check (Active Ping)
+  // Logic: Background Connectivity Check (Non-Blocking)
   // ----------------------------------------------------------------------
   const checkRealConnection = useCallback(async () => {
-    if (!navigator.onLine) {
-      setIsOffline(true);
-      return false;
-    }
-
     setConnectionChecking(true);
     try {
-      // Try to reach a reliable high-availability CDN (no-cors is enough to check network path)
-      // We use a short timeout to fail fast on "Zombie WiFi"
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      // Very short timeout (1.5s) to avoid hanging background tasks
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
       
       await fetch('https://cdn.tailwindcss.com', { 
         method: 'HEAD', 
@@ -134,42 +125,19 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       setConnectionChecking(false);
       return true;
     } catch (e) {
-      console.warn("Connectivity check failed (Zombie WiFi suspected).");
+      // Only set offline if we actively fail
       setIsOffline(true);
       setConnectionChecking(false);
       return false;
     }
   }, []);
 
-  // Initial Connection Check on Mount
+  // Passive check on mount - does not block UI
   useEffect(() => {
-    const init = async () => {
-      const online = await checkRealConnection();
-      // Only restore user setting if we are truly online
-      if (online && song.voiceControlEnabled) {
-        setVoiceControlEnabled(true);
-      }
-    };
-    init();
-  }, []); // Run once on mount
-
-  // Monitor Online/Offline status events
-  useEffect(() => {
-    const handleOnline = async () => {
-        // Don't trust the event blindly, verify with ping
-        const trulyOnline = await checkRealConnection();
-        if (trulyOnline && song.voiceControlEnabled) {
-             setVoiceControlEnabled(true);
-        }
-    };
-
-    const handleOffline = () => {
-      setIsOffline(true);
-      // Force disable voice control immediately
-      setVoiceControlEnabled(false);
-      setLastVoiceCommand("Offline: Voice deaktiviert");
-      setTimeout(() => setLastVoiceCommand(null), 3000);
-    };
+    checkRealConnection();
+    
+    const handleOnline = () => { setIsOffline(false); checkRealConnection(); };
+    const handleOffline = () => setIsOffline(true);
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -177,29 +145,24 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [checkRealConnection, song.voiceControlEnabled]);
+  }, [checkRealConnection]);
 
   // ----------------------------------------------------------------------
-  // Logic: Voice Commands (Speech Recognition)
+  // Logic: Voice Commands (Optimistic Start)
   // ----------------------------------------------------------------------
   useEffect(() => {
-    // Cleanup previous instance
     if (recognitionRef.current) {
-        try {
-            recognitionRef.current.stop();
-        } catch(e) { /* ignore */ }
+        try { recognitionRef.current.stop(); } catch(e) {}
         recognitionRef.current = null;
     }
 
-    // CRITICAL SAFETY: If offline (or ping failed), DO NOT attempt to start Speech Recognition.
-    // It can hang the browser thread on mobile devices trying to reach Google servers.
-    if (!voiceControlEnabled || isOffline) {
+    // If explicitly disabled by user or we KNOW we are offline, don't try.
+    if (!voiceControlEnabled) {
       return;
     }
 
     const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionClass) {
-      console.error("Browser does not support Speech Recognition");
       setMicError(true);
       setVoiceControlEnabled(false);
       return;
@@ -213,37 +176,32 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       const lastIndex = event.results.length - 1;
       const transcript = event.results[lastIndex][0].transcript.trim().toLowerCase();
-      console.log("Voice Command heard:", transcript);
-      
+      console.log("Voice Command:", transcript);
       handleVoiceCommand(transcript);
     };
 
     recognition.onerror = (event: any) => {
-      if (event.error === 'not-allowed') {
+      // This is where we handle the "Offline" reality.
+      // If the browser says "network error", we THEN disable it.
+      if (event.error === 'network') {
+        console.warn("Voice Control: Network error detected.");
+        setIsOffline(true);
+        setVoiceControlEnabled(false); // Disable gracefully
+        setLastVoiceCommand("Offline: Voice deaktiviert");
+      } else if (event.error === 'not-allowed') {
         setMicError(true);
         setVoiceControlEnabled(false);
-      }
-      if (event.error === 'network') {
-        // Specifically handle network errors by disabling the feature
-        console.warn("Network error in speech recognition. Disabling.");
-        setIsOffline(true);
-        setVoiceControlEnabled(false);
-        setLastVoiceCommand("Netzwerkfehler: Voice aus");
       }
     };
 
     recognition.onend = () => {
-      // Only restart if we are still enabled and online
       if (voiceControlEnabled && !isOffline && recognitionRef.current) {
-        try {
-          recognition.start();
-        } catch (e) {
-          // Already started or other error
-        }
+        try { recognition.start(); } catch (e) {}
       }
     };
 
     try {
+      // Try to start. If it throws immediately (e.g. complete loss of signal), catch it.
       recognition.start();
       recognitionRef.current = recognition;
     } catch (e) {
@@ -253,9 +211,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
     return () => {
       if (recognitionRef.current) {
-        try {
-            recognitionRef.current.stop();
-        } catch(e) { /* ignore */ }
+        try { recognitionRef.current.stop(); } catch(e) {}
         recognitionRef.current = null;
       }
     };
@@ -265,39 +221,33 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
     let commandFound = false;
     let feedback = "";
 
-    // Play
     if (text.includes("start") || text.includes("los") || text.includes("play") || text.includes("weiter")) {
       setPlayState(PlayState.PLAYING);
       feedback = "PLAY";
       commandFound = true;
     }
-    // Pause/Stop
     else if (text.includes("stopp") || text.includes("stop") || text.includes("halt") || text.includes("pause") || text.includes("warte")) {
       audioCooldownRef.current = Date.now() + 2000;
-      triggerConfidenceCounterRef.current = 0; // Reset Trigger logic
+      triggerConfidenceCounterRef.current = 0;
       setPlayState(PlayState.PAUSED);
       feedback = "PAUSE";
       commandFound = true;
     }
-    // Reset
     else if (text.includes("anfang") || text.includes("zurück") || text.includes("reset")) {
       handleReset();
       feedback = "RESET";
       commandFound = true;
     }
-    // Speed Up
     else if (text.includes("schneller")) {
       setScrollSpeed(prev => Math.min(15, prev + 0.5));
       feedback = "SCHNELLER";
       commandFound = true;
     }
-    // Slow Down
     else if (text.includes("langsamer")) {
       setScrollSpeed(prev => Math.max(0.5, prev - 0.5));
       feedback = "LANGSAMER";
       commandFound = true;
     }
-    // Exit
     else if (text.includes("ende") || text.includes("schließen") || text.includes("raus")) {
       onExit();
       commandFound = true;
@@ -311,7 +261,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
 
   // ----------------------------------------------------------------------
-  // Logic: Audio Volume Trigger (Auto-Start)
+  // Logic: Audio Volume Trigger (Auto-Start) - No changes needed
   // ----------------------------------------------------------------------
   useEffect(() => {
     if (!autoStartEnabled) {
@@ -353,12 +303,9 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const cleanupAudio = () => {
     if (audioFrameRef.current) cancelAnimationFrame(audioFrameRef.current);
     if (microphoneRef.current) microphoneRef.current.disconnect();
-    if (audioContextRef.current) {
-        if (audioContextRef.current.state !== 'closed') {
-            audioContextRef.current.close();
-        }
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
     }
-    
     microphoneRef.current = null;
     audioContextRef.current = null;
     analyserRef.current = null;
@@ -372,7 +319,6 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
     const dataArray = new Uint8Array(bufferLength);
     analyserRef.current.getByteTimeDomainData(dataArray);
 
-    // Calculate RMS
     let sum = 0;
     for (let i = 0; i < bufferLength; i++) {
       const x = (dataArray[i] - 128) / 128.0; 
@@ -383,27 +329,17 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
 
     setCurrentAudioLevel(prev => volume > prev ? volume : prev * 0.92);
 
-    // Trigger Logic
     const now = Date.now();
     const isCooldownActive = now < audioCooldownRef.current;
-    const isAtEnd = progressRef.current > 0.99; // Only disable at very end
+    const isAtEnd = progressRef.current > 0.99; 
     const isTouching = isScrollingRef.current;
     const isNotPlaying = playStateRef.current !== PlayState.PLAYING;
     
-    if (
-        autoStartEnabledRef.current && 
-        isNotPlaying && 
-        !isCooldownActive &&
-        !isAtEnd &&
-        !isTouching
-    ) {
-        // Only show listening active if not in cooldown
+    if (autoStartEnabledRef.current && isNotPlaying && !isCooldownActive && !isAtEnd && !isTouching) {
         if (!isListening) setIsListening(true);
-
         if (volume > audioThresholdRef.current) {
              triggerConfidenceCounterRef.current += 1;
         } else {
-             // Slower decay to allow for breathing pauses in singing before start
              triggerConfidenceCounterRef.current = Math.max(0, triggerConfidenceCounterRef.current - 1);
         }
 
@@ -416,22 +352,18 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         if (isListening) setIsListening(false);
         triggerConfidenceCounterRef.current = 0;
     }
-    
     audioFrameRef.current = requestAnimationFrame(analyzeAudio);
   };
 
   // ----------------------------------------------------------------------
-  // Logic: Scrolling Animation
+  // Logic: Scrolling Animation - No changes needed
   // ----------------------------------------------------------------------
   const animate = useCallback((time: number) => {
     if (playState !== PlayState.PLAYING || !scrollerRef.current) {
       lastTimeRef.current = 0;
       return;
     }
-
-    if (lastTimeRef.current === 0) {
-      lastTimeRef.current = time;
-    }
+    if (lastTimeRef.current === 0) lastTimeRef.current = time;
 
     const deltaTime = time - lastTimeRef.current;
     lastTimeRef.current = time;
@@ -447,55 +379,42 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
       if (maxScroll > 0) {
         const newProgress = Math.min(scrollerRef.current.scrollTop / maxScroll, 1);
         setProgress(newProgress);
-        
-        if (scrollerRef.current.scrollTop >= maxScroll) {
-          setPlayState(PlayState.PAUSED);
-        }
+        if (scrollerRef.current.scrollTop >= maxScroll) setPlayState(PlayState.PAUSED);
       }
     }
-
     animationFrameRef.current = requestAnimationFrame(animate);
   }, [playState, scrollSpeed]);
 
   useEffect(() => {
     if (playState === PlayState.PLAYING) {
       animationFrameRef.current = requestAnimationFrame(animate);
-      
       if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-      controlsTimeoutRef.current = setTimeout(() => {
-        setControlsVisible(false);
-      }, 2000);
-
+      controlsTimeoutRef.current = setTimeout(() => setControlsVisible(false), 2000);
     } else {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       lastTimeRef.current = 0;
       setControlsVisible(true);
     }
-
     return () => {
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     };
   }, [playState, animate]);
 
-  // Save settings
   useEffect(() => {
     onUpdateSongSettings(song.id, { 
       defaultScrollSpeed: scrollSpeed, 
       fontSize,
       autoStartEnabled,
       audioThreshold,
-      voiceControlEnabled // Keep user preference in saved state
+      voiceControlEnabled 
     });
   }, [scrollSpeed, fontSize, autoStartEnabled, audioThreshold, voiceControlEnabled, song.id, onUpdateSongSettings]);
 
   const handleReset = () => {
-    audioCooldownRef.current = Date.now() + 1000; // Short cooldown on reset
+    audioCooldownRef.current = Date.now() + 1000; 
     setPlayState(PlayState.STOPPED);
     triggerConfidenceCounterRef.current = 0;
-    
     if (scrollerRef.current) {
       scrollerRef.current.scrollTop = 0;
       setProgress(0);
@@ -505,20 +424,16 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   const togglePlay = () => {
     setPlayState(prev => {
         if (prev === PlayState.PLAYING) {
-            // Manual pause: Set cooldown (1.5s) and RESET trigger logic
-            // This ensures it doesn't accidentally restart immediately if volume is high
             audioCooldownRef.current = Date.now() + 1500; 
             triggerConfidenceCounterRef.current = 0;
             return PlayState.PAUSED;
         }
-        // Manual start
         return PlayState.PLAYING;
     });
   };
 
   const handleContainerClick = (e: React.MouseEvent) => {
     if (isScrollingRef.current) return;
-    
     if (!controlsVisible) {
       setControlsVisible(true);
       if (playState === PlayState.PLAYING) {
@@ -531,9 +446,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
   };
 
   const handleScrollBegin = () => { isScrollingRef.current = true; };
-  const handleScrollEnd = () => { 
-     setTimeout(() => { isScrollingRef.current = false; }, 200);
-  };
+  const handleScrollEnd = () => { setTimeout(() => { isScrollingRef.current = false; }, 200); };
 
   return (
     <div 
@@ -560,14 +473,13 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         </div>
       </div>
 
-      {/* Visual Feedback for Voice Command */}
+      {/* Visual Feedback */}
       {lastVoiceCommand && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 bg-cyan-500/90 text-black px-6 py-2 rounded-full font-bold animate-pulse shadow-[0_0_20px_rgba(6,182,212,0.6)] backdrop-blur">
            {lastVoiceCommand}
         </div>
       )}
       
-      {/* Visual Feedback for AutoStart Listening */}
       {isListening && !lastVoiceCommand && !isOffline && (
          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-green-900/80 text-green-100 border border-green-500/30 px-4 py-1 rounded-full text-xs font-bold flex items-center gap-2 backdrop-blur animate-pulse">
            <Ear className="w-3 h-3" />
@@ -613,45 +525,35 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
         className={`absolute bottom-0 left-0 right-0 z-30 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 p-6 flex flex-col gap-6 transition-transform duration-500 ease-in-out shadow-2xl ${controlsVisible ? 'translate-y-0' : 'translate-y-full'}`}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Settings Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto w-full">
-           {/* Speed Control */}
+           {/* Speed */}
            <div className="flex flex-col gap-2">
               <div className="flex justify-between text-xs text-cyan-400 font-semibold uppercase tracking-wider">
                 <span className="flex items-center gap-1"><Gauge className="w-3 h-3"/> Tempo</span>
                 <span>{(scrollSpeed ?? 2.0).toFixed(1)}</span>
               </div>
               <input 
-                type="range" 
-                min="0.5" 
-                max="15" 
-                step="0.1" 
-                value={scrollSpeed ?? 2.0} 
-                onChange={(e) => setScrollSpeed(parseFloat(e.target.value))}
+                type="range" min="0.5" max="15" step="0.1" 
+                value={scrollSpeed ?? 2.0} onChange={(e) => setScrollSpeed(parseFloat(e.target.value))}
                 className="w-full h-3 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 touch-none"
               />
             </div>
 
-            {/* Font Size Control */}
+            {/* Font */}
             <div className="flex flex-col gap-2">
               <div className="flex justify-between text-xs text-cyan-400 font-semibold uppercase tracking-wider">
                 <span className="flex items-center gap-1"><Type className="w-3 h-3"/> Größe</span>
                 <span>{fontSize ?? 42}px</span>
               </div>
               <input 
-                type="range" 
-                min="24" 
-                max="120" 
-                step="2" 
-                value={fontSize ?? 42} 
-                onChange={(e) => setFontSize(parseInt(e.target.value))}
+                type="range" min="24" max="120" step="2" 
+                value={fontSize ?? 42} onChange={(e) => setFontSize(parseInt(e.target.value))}
                 className="w-full h-3 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 touch-none"
               />
             </div>
 
-            {/* Audio Controls Container */}
+            {/* Audio */}
             <div className="flex flex-col gap-3">
-               {/* Auto-Start Audio Control */}
                <div className="flex items-center gap-2">
                  <button 
                     onClick={() => setAutoStartEnabled(!autoStartEnabled)}
@@ -662,34 +564,20 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
                  </button>
                  
                  <button 
-                    onClick={async () => {
-                      if (isOffline) return;
-                      // Manual toggle needs check too
-                      if (!voiceControlEnabled) {
-                         const ok = await checkRealConnection();
-                         if(ok) setVoiceControlEnabled(true);
-                      } else {
-                         setVoiceControlEnabled(false);
-                      }
-                    }}
-                    disabled={isOffline || connectionChecking}
+                    onClick={() => setVoiceControlEnabled(!voiceControlEnabled)}
                     className={`flex-1 flex items-center justify-center gap-1 text-[10px] md:text-xs font-semibold uppercase tracking-wider py-1.5 rounded transition-colors ${
-                        isOffline ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed' : 
                         connectionChecking ? 'bg-slate-800 text-yellow-400 border border-yellow-700/30 animate-pulse' :
                         voiceControlEnabled ? 'bg-purple-900 text-purple-300 border border-purple-700' : 
                         'bg-slate-800 text-slate-400 border border-slate-700'
                     }`}
                  >
-                    {isOffline ? <WifiOff className="w-3 h-3" /> : 
-                     connectionChecking ? <Wifi className="w-3 h-3" /> :
+                    {connectionChecking ? <Wifi className="w-3 h-3" /> :
                      voiceControlEnabled ? <Speech className="w-3 h-3" /> : 
                      <MicOff className="w-3 h-3 opacity-50" />}
-                    
-                    {isOffline ? "Offline" : connectionChecking ? "Prüfe..." : "Voice Cmd"}
+                    {connectionChecking ? "Prüfe..." : "Voice Cmd"}
                  </button>
                </div>
                
-               {/* Audio Threshold Visualizer (Only if AutoStart is on) */}
                {autoStartEnabled ? (
                  <div className="relative w-full h-6 flex items-center">
                     <div className="absolute left-0 top-1/2 -translate-y-1/2 h-1.5 bg-slate-800 w-full rounded overflow-hidden">
@@ -699,12 +587,8 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
                        />
                     </div>
                     <input 
-                      type="range" 
-                      min="1" 
-                      max="100" 
-                      step="1" 
-                      value={audioThreshold ?? 20} 
-                      onChange={(e) => setAudioThreshold(parseInt(e.target.value))}
+                      type="range" min="1" max="100" step="1" 
+                      value={audioThreshold ?? 20} onChange={(e) => setAudioThreshold(parseInt(e.target.value))}
                       className="absolute w-full h-8 top-0 opacity-0 cursor-pointer z-20"
                     />
                      <div 
@@ -725,7 +609,7 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
             </div>
         </div>
 
-        {/* Transport Controls */}
+        {/* Transport */}
         <div className="flex items-center justify-center gap-8 max-w-4xl mx-auto w-full pb-safe">
             <button 
               onClick={handleReset}
@@ -745,7 +629,6 @@ export const Prompter: React.FC<PrompterProps> = ({ song, onExit, onUpdateSongSe
               {playState === PlayState.PLAYING ? <Pause className="w-10 h-10 fill-current" /> : <Play className="w-10 h-10 fill-current pl-1" />}
             </button>
             
-            {/* Placeholder for balance */}
             <div className="w-14"></div> 
         </div>
       </div>
