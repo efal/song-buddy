@@ -1,5 +1,5 @@
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Song } from '../types';
 import { useAudioMonitor, useMetronome } from '../services/audio';
 import { ArrowLeft, Mic, Play, Maximize2, Minimize2, Type, MoveVertical, Pause, RotateCcw, Activity } from 'lucide-react';
@@ -132,7 +132,8 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   }, []);
 
   // Manual Page Scrolling Helper
-  const pageScroll = (direction: 'up' | 'down') => {
+  // Optimized: wrapped in useCallback and behavior set to 'auto' to avoid conflict with animation loop
+  const pageScroll = useCallback((direction: 'up' | 'down') => {
     if (containerRef.current) {
         const { clientHeight } = containerRef.current;
         // Scroll 75% of viewport height to maintain some context context
@@ -141,20 +142,20 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
         
         containerRef.current.scrollTo({
             top: newTop,
-            behavior: 'smooth'
+            behavior: 'auto' // Important: 'smooth' conflicts with requestAnimationFrame, 'auto' is instant and works
         });
     }
-  };
+  }, []);
 
   // Handle Reset logic
-  const handleReset = (e?: React.MouseEvent | KeyboardEvent) => {
+  const handleReset = useCallback((e?: React.MouseEvent | KeyboardEvent) => {
     if (e) e.stopPropagation();
     if (containerRef.current) {
         containerRef.current.scrollTop = 0;
         setIsScrolling(false);
         updateProgressBar();
     }
-  };
+  }, []);
 
   // Keyboard / Foot Switch Control (Bluetooth HID)
   useEffect(() => {
@@ -197,7 +198,7 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [pageScroll, handleReset]); // Dependencies added to prevent stale closures
 
   // Fullscreen Toggle
   const toggleFullscreen = async () => {
