@@ -132,18 +132,18 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   }, []);
 
   // Manual Page Scrolling Helper
-  // Optimized: wrapped in useCallback and behavior set to 'auto' to avoid conflict with animation loop
+  // Optimized: wrapped in useCallback and behavior set to direct assignment to avoid conflict with animation loop
   const pageScroll = useCallback((direction: 'up' | 'down') => {
     if (containerRef.current) {
-        const { clientHeight } = containerRef.current;
+        const { clientHeight, scrollTop } = containerRef.current;
         // Scroll 75% of viewport height to maintain some context context
         const scrollAmount = clientHeight * 0.75; 
-        const newTop = containerRef.current.scrollTop + (direction === 'down' ? scrollAmount : -scrollAmount);
+        const newTop = scrollTop + (direction === 'down' ? scrollAmount : -scrollAmount);
         
-        containerRef.current.scrollTo({
-            top: newTop,
-            behavior: 'auto' // Important: 'smooth' conflicts with requestAnimationFrame, 'auto' is instant and works
-        });
+        // Direct assignment to force update even if RAF loop is running. 
+        // This overrides the browser's smooth scrolling queue and ensures the key press "wins".
+        containerRef.current.scrollTop = newTop;
+        updateProgressBar();
     }
   }, []);
 
