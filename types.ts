@@ -1,25 +1,44 @@
 
+export interface AudioTriggerConfig {
+  threshold: number; // dB value, e.g., -40
+}
+
+export interface MetronomeConfig {
+  bpm: number;
+  beatsPerBar: number;
+  clickPitch: number; // Frequency in Hz (e.g., 1000)
+  enabled: boolean; // Default state when entering live mode
+}
+
 export interface Song {
   id: string;
   title: string;
-  artist: string;
   lyrics: string;
-  durationSeconds?: number;
-  defaultScrollSpeed: number; // 0-10
-  fontSize: number; // px
-  autoStartEnabled?: boolean;
-  audioThreshold?: number; // 0-100
-  voiceControlEnabled?: boolean;
+  fontsize: number; // px
+  scrollspeed: number; // pixels per second
+  audioTrigger: AudioTriggerConfig;
+  metronome: MetronomeConfig;
+  order?: number; // For playlist sorting
+  createdAt: number;
 }
 
-export interface AppState {
+export interface SongLibrary {
+  version: number;
   songs: Song[];
-  view: 'library' | 'editor' | 'prompter';
-  activeSongId: string | null;
 }
 
-export enum PlayState {
-  STOPPED = 'STOPPED',
-  PLAYING = 'PLAYING',
-  PAUSED = 'PAUSED'
-}
+export const DEFAULT_SONG: Omit<Song, 'id' | 'createdAt'> = {
+  title: '',
+  lyrics: '',
+  fontsize: 48,
+  scrollspeed: 30,
+  audioTrigger: {
+    threshold: -35
+  },
+  metronome: {
+    bpm: 120,
+    beatsPerBar: 4,
+    clickPitch: 1000,
+    enabled: false
+  }
+};

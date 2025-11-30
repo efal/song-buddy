@@ -1,128 +1,131 @@
-import React, { useState, useEffect } from 'react';
-import { Song, AppState } from './types';
-import { SongList } from './components/SongList';
-import { SongEditor } from './components/SongEditor';
-import { Prompter } from './components/Prompter';
+import React, { useEffect, useState } from 'react';
+import { HashRouter } from 'react-router-dom';
+import SongList from './components/SongList';
+import SongEditor from './components/SongEditor';
+import LiveMode from './components/LiveMode';
+import { storageService } from './services/storage';
+import { Song } from './types';
 
-const STORAGE_KEY = 'song_buddy_library';
+const AppContent: React.FC = () => {
+  const [view, setView] = useState<'list' | 'editor' | 'live'>('list');
+  const [songs, setSongs] = useState<Song[]>([]);
+  const [activeSong, setActiveSong] = useState<Song | null>(null);
+  const [loading, setLoading] = useState(true);
 
-const App: React.FC = () => {
-  const [state, setState] = useState<AppState>({
-    songs: [],
-    view: 'library',
-    activeSongId: null,
-  });
+  const refreshSongs = async () => {
+    setLoading(true);
+    const data = await storageService.getAllSongs();
+    setSongs(data);
+    setLoading(false);
+  };
 
-  // Load from local storage on mount
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const songs = JSON.parse(saved);
-        setState(prev => ({ ...prev, songs }));
-      } catch (e) {
-        console.error("Failed to load songs", e);
-      }
-    }
+    refreshSongs();
   }, []);
 
-  // Save to local storage whenever songs change
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.songs));
-  }, [state.songs]);
-
-  const handleSaveSong = (song: Song) => {
-    setState(prev => {
-      const exists = prev.songs.find(s => s.id === song.id);
-      const newSongs = exists 
-        ? prev.songs.map(s => s.id === song.id ? song : s)
-        : [...prev.songs, song];
-      
-      return {
-        ...prev,
-        songs: newSongs,
-        view: 'library',
-        activeSongId: null
-      };
-    });
+  const handleCreate = () => {
+    setActiveSong(null);
+    setView('editor');
   };
 
-  const handleDeleteSong = (id: string) => {
-    setState(prev => ({
-      ...prev,
-      songs: prev.songs.filter(s => s.id !== id)
-    }));
+  const handleEdit = (song: Song) => {
+    setActiveSong(song);
+    setView('editor');
   };
 
-  const handleImportSongs = (importedSongs: Song[]) => {
-    // Merge or replace? For simplicity and safety (avoid duplicates), we'll merge by ID
-    setState(prev => {
-       const currentMap = new Map(prev.songs.map(s => [s.id, s]));
-       importedSongs.forEach(s => currentMap.set(s.id, s));
-       return {
-           ...prev,
-           songs: Array.from(currentMap.values())
-       };
-    });
+  const handlePlay = (song: Song) => {
+    setActiveSong(song);
+    setView('live');
   };
 
-  const handleReorderSongs = (reorderedSongs: Song[]) => {
-    setState(prev => ({
-      ...prev,
-      songs: reorderedSongs
-    }));
+  const handleSave = () => {
+    refreshSongs();
+    setView('list');
+    setActiveSong(null);
   };
 
-  const handleUpdateSettings = (id: string, settings: Partial<Song>) => {
-    setState(prev => ({
-      ...prev,
-      songs: prev.songs.map(s => s.id === id ? { ...s, ...settings } : s)
-    }));
-  };
-
-  const renderView = () => {
-    switch (state.view) {
-      case 'editor':
-        const songToEdit = state.songs.find(s => s.id === state.activeSongId);
-        return (
-          <SongEditor 
-            existingSong={songToEdit} 
-            onSave={handleSaveSong}
-            onCancel={() => setState(prev => ({ ...prev, view: 'library', activeSongId: null }))}
-          />
-        );
-      
-      case 'prompter':
-        const activeSong = state.songs.find(s => s.id === state.activeSongId);
-        if (!activeSong) return null;
-        return (
-          <Prompter 
-            song={activeSong}
-            onExit={() => setState(prev => ({ ...prev, view: 'library', activeSongId: null }))}
-            onUpdateSongSettings={handleUpdateSettings}
-          />
-        );
-
-      case 'library':
-      default:
-        return (
-          <SongList 
-            songs={state.songs}
-            onAddSong={() => setState(prev => ({ ...prev, view: 'editor', activeSongId: null }))}
-            onSelectSong={(song) => setState(prev => ({ ...prev, view: 'prompter', activeSongId: song.id }))}
-            onEditSong={(song) => setState(prev => ({ ...prev, view: 'editor', activeSongId: song.id }))}
-            onDeleteSong={handleDeleteSong}
-            onImportSongs={handleImportSongs}
-            onReorderSongs={handleReorderSongs}
-          />
-        );
+  // Called when slider changes in list view or live mode
+  const handleQuickUpdate = async (updatedSong: Song) => {
+    // Optimistic UI update for the list
+    setSongs(prev => prev.map(s => s.id === updatedSong.id ? updatedSong : s));
+    
+    // If we are currently viewing this song (Live Mode), update the active state too
+    if (activeSong && activeSong.id === updatedSong.id) {
+        setActiveSong(updatedSong);
     }
+
+    // Persist to DB
+    await storageService.saveSong(updatedSong);
   };
+
+  const handleReorder = async (newOrderSongs: Song[]) => {
+    // Update local state immediately for UI responsiveness
+    setSongs(newOrderSongs);
+
+    // Update order property on all songs and persist
+    // We assume the new array index is the desired order
+    const updates = newOrderSongs.map((song, index) => {
+        const updated = { ...song, order: index };
+        return storageService.saveSong(updated);
+    });
+
+    await Promise.all(updates);
+  };
+
+  const handleCloseEditor = () => {
+    setView('list');
+    setActiveSong(null);
+  };
+
+  const handleExitLive = () => {
+    setView('list');
+    setActiveSong(null);
+  };
+
+  if (loading) {
+    return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading Library...</div>;
+  }
 
   return (
-    <main className="flex-1 relative bg-slate-950 h-full w-full overflow-hidden">
-      {renderView()}
-    </main>
+    <div className="h-full w-full bg-gray-900">
+        {view === 'list' && (
+          <div className="h-full w-full overflow-y-auto">
+            <SongList 
+                songs={songs} 
+                onCreate={handleCreate} 
+                onEdit={handleEdit} 
+                onPlay={handlePlay} 
+                onUpdate={handleQuickUpdate}
+                onReorder={handleReorder}
+                onRefresh={refreshSongs}
+            />
+          </div>
+        )}
+
+        {view === 'editor' && (
+          <SongEditor 
+            existingSong={activeSong} 
+            onSave={handleSave} 
+            onClose={handleCloseEditor} 
+          />
+        )}
+
+        {view === 'live' && activeSong && (
+          <LiveMode 
+            song={activeSong} 
+            onExit={handleExitLive} 
+            onUpdate={handleQuickUpdate}
+          />
+        )}
+    </div>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <HashRouter>
+       <AppContent />
+    </HashRouter>
   );
 };
 
