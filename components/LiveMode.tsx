@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Song } from '../types';
 import { useAudioMonitor, useMetronome } from '../services/audio';
@@ -23,14 +24,14 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLongPressHandled = useRef(false);
 
-  // Reference to song to access latest values inside requestAnimationFrame closure
+  // Refs for State to be accessible in persistent Event Listeners
+  const isScrollingRef = useRef(isScrolling);
   const songRef = useRef(song);
   
-  // Update ref when song changes (e.g. via sliders)
-  useEffect(() => {
-    songRef.current = song;
-  }, [song]);
-  
+  // Sync refs with state/props
+  useEffect(() => { isScrollingRef.current = isScrolling; }, [isScrolling]);
+  useEffect(() => { songRef.current = song; }, [song]);
+
   // Audio Monitor (Mic) - Disable monitoring while scrolling to save performance
   const shouldMonitor = isMonitoring && !isScrolling;
   const { triggered } = useAudioMonitor(shouldMonitor, song.audioTrigger.threshold);
@@ -127,13 +128,14 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
     };
   }, [updateProgressBar]);
 
-  // Manual Page Scrolling Helper (Direct assignment for immediate effect)
+  // --- ACTIONS ---
+
   const pageScroll = useCallback((direction: 'up' | 'down') => {
     if (containerRef.current) {
         const { clientHeight, scrollTop } = containerRef.current;
         const scrollAmount = clientHeight * 0.75; 
         const newTop = scrollTop + (direction === 'down' ? scrollAmount : -scrollAmount);
-        // Direct assignment to force update instantly
+        // Direct assignment to force update instantly, overriding any animation frame that might run in parallel
         containerRef.current.scrollTop = newTop;
         updateProgressBar();
     }
@@ -158,17 +160,45 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
       onUpdate({ ...songRef.current, scrollspeed: newSpeed });
   }, [onUpdate]);
 
-  // Keyboard Handler (Bluetooth Pedal)
+  // --- KEYBOARD HANDLING (Persistent) ---
+
+  // We store the latest handlers in a ref so the event listener (which is bound once) 
+  // can always access the latest closures without needing to re-bind.
+  const handlersRef = useRef({
+      toggleScroll,
+      toggleMetronome,
+      handleReset,
+      pageScroll,
+      handleSpeedAdjustment
+  });
+
+  // Update handlers ref on every render
+  useEffect(() => {
+      handlersRef.current = {
+          toggleScroll,
+          toggleMetronome,
+          handleReset,
+          pageScroll,
+          handleSpeedAdjustment
+      };
+  });
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is typing in an input (unlikely in live mode but good practice)
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       const isRepeat = e.repeat;
+      const { toggleScroll, toggleMetronome, handleReset, pageScroll, handleSpeedAdjustment } = handlersRef.current;
+      const isScrolling = isScrollingRef.current; // Access current state via Ref
 
-      // Handle Long Press for Enter/Return to toggle Metronome
-      if ((e.key === 'Enter' || e.key === ' ') && !isRepeat) {
+      // Handle Long Press for Enter/Return/Home/ArrowUp to toggle Metronome
+      const isActionKey = e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Home';
+      
+      if (isActionKey && !isRepeat) {
          isLongPressHandled.current = false;
+         // Clear any existing timer to be safe
+         if (longPressTimer.current) clearTimeout(longPressTimer.current);
+         
          longPressTimer.current = setTimeout(() => {
              toggleMetronome();
              if (navigator.vibrate) navigator.vibrate(50);
@@ -180,13 +210,13 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
         case ' ':
         case 'Enter':
         case 'ArrowDown':
-           // We handle the actual action on KeyUp or if it wasn't a long press
+           // Action handled on KeyUp or LongPress timeout
            break;
 
         case 'ArrowUp':
         case 'Home':
           e.preventDefault();
-          handleReset();
+           // Action handled on KeyUp or LongPress timeout
           break;
 
         case 'PageDown':
@@ -212,33 +242,45 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-        if (e.key === 'Enter' || e.key === ' ') {
+        const { toggleScroll, handleReset } = handlersRef.current;
+        
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Home') {
             if (longPressTimer.current) {
                 clearTimeout(longPressTimer.current);
                 longPressTimer.current = null;
             }
+            
+            // Only execute short press action if long press wasn't triggered
             if (!isLongPressHandled.current) {
-                // Short press action
-                toggleScroll();
+                if (e.key === 'ArrowUp' || e.key === 'Home') {
+                    handleReset();
+                } else {
+                    toggleScroll();
+                }
             }
             isLongPressHandled.current = false;
         }
     };
 
+    // Bind listeners ONCE. Dependencies are empty to prevent re-binding and killing timers.
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       if (longPressTimer.current) clearTimeout(longPressTimer.current);
     };
-  }, [isScrolling, handleReset, toggleScroll, pageScroll, handleSpeedAdjustment, toggleMetronome]);
+  }, []); // Empty dependency array = stable listeners!
 
-  // Touch Gestures
+  // --- TOUCH HANDLING ---
+
   const handleTouchStart = () => {
       isLongPressHandled.current = false;
+      if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      
       longPressTimer.current = setTimeout(() => {
-          toggleMetronome();
+          handlersRef.current.toggleMetronome();
           if (navigator.vibrate) navigator.vibrate(50);
           isLongPressHandled.current = true;
       }, 2000);
@@ -254,7 +296,7 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
           // Check if target is a control button to avoid conflict
           const target = e.target as HTMLElement;
           if (!target.closest('button') && !target.closest('input')) {
-             toggleScroll();
+             handlersRef.current.toggleScroll();
           }
       }
   };
@@ -280,29 +322,17 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
 
         <div className="flex items-center space-x-4">
             <button 
-                onMouseDown={() => {
-                   isLongPressHandled.current = false;
-                   longPressTimer.current = setTimeout(() => {
-                       toggleMetronome();
-                       if (navigator.vibrate) navigator.vibrate(50);
-                       isLongPressHandled.current = true;
-                   }, 2000);
-                }}
+                onMouseDown={(e) => { e.stopPropagation(); handleTouchStart(); }}
                 onMouseUp={(e) => {
-                    if (longPressTimer.current) clearTimeout(longPressTimer.current);
-                    if (!isLongPressHandled.current) handleReset(e);
+                     e.stopPropagation();
+                     if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                     if (!isLongPressHandled.current) handleReset(e);
                 }}
-                onTouchStart={() => {
-                   isLongPressHandled.current = false;
-                   longPressTimer.current = setTimeout(() => {
-                       toggleMetronome();
-                       if (navigator.vibrate) navigator.vibrate(50);
-                       isLongPressHandled.current = true;
-                   }, 2000);
-                }}
+                onTouchStart={(e) => { e.stopPropagation(); handleTouchStart(); }}
                 onTouchEnd={(e) => {
-                    if (longPressTimer.current) clearTimeout(longPressTimer.current);
-                    if (!isLongPressHandled.current) handleReset(e as any);
+                     e.stopPropagation();
+                     if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                     if (!isLongPressHandled.current) handleReset(e as any);
                 }}
                 className="p-3 rounded-full hover:bg-white/10 text-white/70 hover:text-white"
             >
@@ -324,7 +354,7 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
       <div 
         ref={containerRef}
         className="flex-1 overflow-y-auto no-scrollbar scroll-smooth"
-        style={{ scrollBehavior: 'auto' }} // Controlled manually
+        style={{ scrollBehavior: 'auto' }} // Controlled manually for reliability
       >
         <div className="min-h-[40vh]" /> {/* Top spacer */}
         <div 

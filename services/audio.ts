@@ -14,6 +14,7 @@ export const useAudioMonitor = (enabled: boolean, thresholdDB: number) => {
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const thresholdRef = useRef(thresholdDB);
+  const lastUpdateRef = useRef<number>(0);
 
   // Update ref when prop changes so the animation loop sees the new value
   useEffect(() => {
@@ -38,10 +39,18 @@ export const useAudioMonitor = (enabled: boolean, thresholdDB: number) => {
     // Use a small epsilon to avoid log(0) = -Infinity
     const db = 20 * Math.log10(Math.max(rms, 1e-7));
     
-    setCurrentDB(db);
-
-    if (db > thresholdRef.current) {
-        setTriggered(true);
+    // Throttle state updates to ~10fps (100ms) to prevent React render thrashing
+    const now = Date.now();
+    if (now - lastUpdateRef.current > 100) {
+        setCurrentDB(db);
+        lastUpdateRef.current = now;
+        
+        // Trigger logic inside the throttle block is fine for this use case, 
+        // or we could move it outside if we need instant reaction, 
+        // but 100ms latency for a generic volume trigger is usually acceptable.
+        if (db > thresholdRef.current) {
+            setTriggered(true);
+        }
     }
 
     animationFrameRef.current = requestAnimationFrame(analyze);
@@ -183,16 +192,19 @@ export const useMetronome = (initialBpm: number, beatsPerBar: number, clickPitch
     };
   }, []);
 
-  const nextNote = () => {
+  // Stable reference to scheduler needed? No, called from worker event.
+  // But we need to make sure scheduler closes over the refs.
+  
+  const nextNote = useCallback(() => {
     const secondsPerBeat = 60.0 / bpmRef.current;
     nextNoteTimeRef.current += secondsPerBeat;
     currentBeatRef.current++;
     if (currentBeatRef.current >= beatsPerBarRef.current) {
       currentBeatRef.current = 0;
     }
-  };
+  }, []);
 
-  const scheduleNote = (beatNumber: number, time: number, context: AudioContext) => {
+  const scheduleNote = useCallback((beatNumber: number, time: number, context: AudioContext) => {
     const osc = context.createOscillator();
     const gain = context.createGain();
 
@@ -213,43 +225,55 @@ export const useMetronome = (initialBpm: number, beatsPerBar: number, clickPitch
 
     osc.start(time);
     osc.stop(time + 0.1);
-  };
+  }, []);
 
-  const scheduler = () => {
+  const scheduler = useCallback(() => {
     if (!audioContextRef.current) return;
     
     // While there are notes that will need to play before the next interval, 
     // schedule them and advance the pointer.
-    // context.currentTime is the high-precision hardware time.
     while (nextNoteTimeRef.current < audioContextRef.current.currentTime + scheduleAheadTime) {
       scheduleNote(currentBeatRef.current, nextNoteTimeRef.current, audioContextRef.current);
       nextNote();
     }
-  };
+  }, [nextNote, scheduleNote]);
 
-  const toggleMetronome = async () => {
-    if (isPlaying) {
-      // Stop
-      workerRef.current?.postMessage("stop");
-      setIsPlaying(false);
-    } else {
-      // Start
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
-      }
+  const toggleMetronome = useCallback(async () => {
+    // We use functional update or ref for isPlaying to avoid dependency cycle if we were inside an effect,
+    // but here it is an event handler. However, we want this function reference to be stable.
+    // We need to access the CURRENT value of isPlaying.
+    
+    // Since we can't easily access the current state value inside a useCallback without adding it to deps (breaking stability),
+    // we will check a Ref that tracks playing state, or use the worker state.
+    // Simpler approach: Check if worker is running? No.
+    // Let's rely on the React state setter to toggle.
+    
+    setIsPlaying(prev => {
+        const newState = !prev;
+        if (!newState) {
+            // Stop
+            workerRef.current?.postMessage("stop");
+        } else {
+            // Start
+            (async () => {
+                if (!audioContextRef.current) {
+                    audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+                }
+                
+                if (audioContextRef.current.state === 'suspended') {
+                    await audioContextRef.current.resume();
+                }
 
-      currentBeatRef.current = 0;
-      // Start slightly in the future to avoid immediate catch-up sounds
-      nextNoteTimeRef.current = audioContextRef.current.currentTime + 0.05;
-      
-      workerRef.current?.postMessage("start");
-      setIsPlaying(true);
-    }
-  };
+                currentBeatRef.current = 0;
+                // Start slightly in the future to avoid immediate catch-up sounds
+                nextNoteTimeRef.current = audioContextRef.current.currentTime + 0.05;
+                
+                workerRef.current?.postMessage("start");
+            })();
+        }
+        return newState;
+    });
+  }, []);
 
   // Cleanup audio context on unmount
   useEffect(() => {
