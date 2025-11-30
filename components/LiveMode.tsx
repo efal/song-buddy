@@ -20,9 +20,9 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   const lastFrameTime = useRef<number>(0);
   const animationRef = useRef<number>(0);
 
-  // Long press refs for gestures/keyboard
-  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isLongPressHandled = useRef(false);
+  // Long press refs for TOUCH gestures only
+  const touchLongPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTouchLongPressHandled = useRef(false);
 
   // Refs for State to be accessible in persistent Event Listeners
   const isScrollingRef = useRef(isScrolling);
@@ -133,7 +133,7 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   const pageScroll = useCallback((direction: 'up' | 'down') => {
     if (containerRef.current) {
         const { clientHeight, scrollTop } = containerRef.current;
-        const scrollAmount = clientHeight * 0.75; 
+        const scrollAmount = clientHeight * 0.70; // 70% per jump
         const newTop = scrollTop + (direction === 'down' ? scrollAmount : -scrollAmount);
         // Direct assignment to force update instantly, overriding any animation frame that might run in parallel
         containerRef.current.scrollTop = newTop;
@@ -162,24 +162,24 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
 
   // --- KEYBOARD HANDLING (Persistent) ---
 
-  // We store the latest handlers in a ref so the event listener (which is bound once) 
-  // can always access the latest closures without needing to re-bind.
   const handlersRef = useRef({
       toggleScroll,
       toggleMetronome,
       handleReset,
       pageScroll,
-      handleSpeedAdjustment
+      handleSpeedAdjustment,
+      onExit
   });
 
-  // Update handlers ref on every render
+  // Update handlers ref on every render to ensure latest functions are used
   useEffect(() => {
       handlersRef.current = {
           toggleScroll,
           toggleMetronome,
           handleReset,
           pageScroll,
-          handleSpeedAdjustment
+          handleSpeedAdjustment,
+          onExit
       };
   });
 
@@ -187,112 +187,79 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-      const isRepeat = e.repeat;
-      const { toggleScroll, toggleMetronome, handleReset, pageScroll, handleSpeedAdjustment } = handlersRef.current;
-      const isScrolling = isScrollingRef.current; // Access current state via Ref
-
-      // Handle Long Press for Enter/Return/Home/ArrowUp to toggle Metronome
-      const isActionKey = e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Home';
-      
-      if (isActionKey && !isRepeat) {
-         isLongPressHandled.current = false;
-         // Clear any existing timer to be safe
-         if (longPressTimer.current) clearTimeout(longPressTimer.current);
-         
-         longPressTimer.current = setTimeout(() => {
-             toggleMetronome();
-             if (navigator.vibrate) navigator.vibrate(50);
-             isLongPressHandled.current = true;
-         }, 2000); // 2 seconds long press
-      }
+      const { toggleScroll, toggleMetronome, handleReset, pageScroll, handleSpeedAdjustment, onExit } = handlersRef.current;
+      const isScrolling = isScrollingRef.current;
 
       switch (e.key) {
-        case ' ':
         case 'Enter':
-        case 'ArrowDown':
-           // Action handled on KeyUp or LongPress timeout
-           break;
-
-        case 'ArrowUp':
-        case 'Home':
           e.preventDefault();
-           // Action handled on KeyUp or LongPress timeout
+          toggleScroll();
           break;
 
         case 'PageDown':
-        case 'ArrowRight':
           e.preventDefault();
           if (isScrolling) {
-            handleSpeedAdjustment(1.1); // Speed up
+            handleSpeedAdjustment(1.1); // 10% faster
           } else {
             pageScroll('down');
           }
           break;
 
         case 'PageUp':
-        case 'ArrowLeft':
           e.preventDefault();
           if (isScrolling) {
-            handleSpeedAdjustment(0.9); // Slow down
+            handleSpeedAdjustment(0.9); // 10% slower
           } else {
             pageScroll('up');
           }
           break;
+
+        case 'm':
+        case 'M':
+          e.preventDefault();
+          toggleMetronome();
+          break;
+
+        case 'b':
+        case 'B':
+          e.preventDefault();
+          onExit();
+          break;
+
+        case 'Home':
+          e.preventDefault();
+          handleReset();
+          break;
       }
     };
 
-    const handleKeyUp = (e: KeyboardEvent) => {
-        const { toggleScroll, handleReset } = handlersRef.current;
-        
-        if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowUp' || e.key === 'Home') {
-            if (longPressTimer.current) {
-                clearTimeout(longPressTimer.current);
-                longPressTimer.current = null;
-            }
-            
-            // Only execute short press action if long press wasn't triggered
-            if (!isLongPressHandled.current) {
-                if (e.key === 'ArrowUp' || e.key === 'Home') {
-                    handleReset();
-                } else {
-                    toggleScroll();
-                }
-            }
-            isLongPressHandled.current = false;
-        }
-    };
-
-    // Bind listeners ONCE. Dependencies are empty to prevent re-binding and killing timers.
     window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
     
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      if (longPressTimer.current) clearTimeout(longPressTimer.current);
     };
-  }, []); // Empty dependency array = stable listeners!
+  }, []); 
 
-  // --- TOUCH HANDLING ---
+  // --- TOUCH HANDLING (Screen only) ---
 
   const handleTouchStart = () => {
-      isLongPressHandled.current = false;
-      if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      isTouchLongPressHandled.current = false;
+      if (touchLongPressTimer.current) clearTimeout(touchLongPressTimer.current);
       
-      longPressTimer.current = setTimeout(() => {
+      touchLongPressTimer.current = setTimeout(() => {
           handlersRef.current.toggleMetronome();
           if (navigator.vibrate) navigator.vibrate(50);
-          isLongPressHandled.current = true;
-      }, 2000);
+          isTouchLongPressHandled.current = true;
+      }, 2000); // Keep 2s long press for touch gestures
   };
 
   const handleTouchEnd = (e: React.MouseEvent | React.TouchEvent) => {
-      if (longPressTimer.current) {
-          clearTimeout(longPressTimer.current);
-          longPressTimer.current = null;
+      if (touchLongPressTimer.current) {
+          clearTimeout(touchLongPressTimer.current);
+          touchLongPressTimer.current = null;
       }
       // If it wasn't a long press and we are clicking the main container
-      if (!isLongPressHandled.current) {
+      if (!isTouchLongPressHandled.current) {
           // Check if target is a control button to avoid conflict
           const target = e.target as HTMLElement;
           if (!target.closest('button') && !target.closest('input')) {
@@ -312,7 +279,7 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
       {/* Top Header */}
       <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center bg-black/40 backdrop-blur-sm z-20 transition-opacity duration-300">
         <div className="flex items-center space-x-4">
-            <button onClick={onExit} className="p-2 rounded-full hover:bg-white/10 text-white/70 hover:text-white">
+            <button onClick={onExit} className="p-2 rounded-full hover:bg-white/10 text-white/70 hover:text-white" title="Back (B)">
               <ArrowLeft size={32} />
             </button>
             <h1 className="text-xl font-bold text-white/90 truncate max-w-[200px] sm:max-w-md">
@@ -325,25 +292,27 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
                 onMouseDown={(e) => { e.stopPropagation(); handleTouchStart(); }}
                 onMouseUp={(e) => {
                      e.stopPropagation();
-                     if (longPressTimer.current) clearTimeout(longPressTimer.current);
-                     if (!isLongPressHandled.current) handleReset(e);
+                     if (touchLongPressTimer.current) clearTimeout(touchLongPressTimer.current);
+                     if (!isTouchLongPressHandled.current) handleReset(e);
                 }}
                 onTouchStart={(e) => { e.stopPropagation(); handleTouchStart(); }}
                 onTouchEnd={(e) => {
                      e.stopPropagation();
-                     if (longPressTimer.current) clearTimeout(longPressTimer.current);
-                     if (!isLongPressHandled.current) handleReset(e as any);
+                     if (touchLongPressTimer.current) clearTimeout(touchLongPressTimer.current);
+                     if (!isTouchLongPressHandled.current) handleReset(e as any);
                 }}
                 className="p-3 rounded-full hover:bg-white/10 text-white/70 hover:text-white"
+                title="Reset to Top (Home)"
             >
                <RotateCcw size={28} />
             </button>
-            <button onClick={(e) => { e.stopPropagation(); toggleScroll(); }} className="p-3 bg-blue-600/80 hover:bg-blue-600 text-white rounded-full">
+            <button onClick={(e) => { e.stopPropagation(); toggleScroll(); }} className="p-3 bg-blue-600/80 hover:bg-blue-600 text-white rounded-full" title="Play/Pause (Enter)">
               {isScrolling ? <Pause size={32} /> : <Play size={32} fill="currentColor" />}
             </button>
             <button 
                 onClick={(e) => { e.stopPropagation(); toggleMetronome(); }} 
                 className={`p-3 rounded-full ${isMetronomePlaying ? 'bg-yellow-600 text-white' : 'text-white/50 hover:text-white hover:bg-white/10'}`}
+                title="Metronome (M)"
             >
                <Activity size={28} />
             </button>
