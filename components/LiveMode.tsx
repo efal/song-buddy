@@ -157,6 +157,13 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
     }
   }, []);
 
+  // Helper to change speed safely
+  const handleSpeedAdjustment = useCallback((factor: number) => {
+      const currentSpeed = song.scrollspeed;
+      const newSpeed = Math.max(5, Math.round(currentSpeed * factor));
+      onUpdate({ ...song, scrollspeed: newSpeed });
+  }, [song, onUpdate]);
+
   // Keyboard / Foot Switch Control (Bluetooth HID)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -177,28 +184,40 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
         return;
       }
 
-      // 3. Page Down (Blättern) - NEW
+      // 3. Page Down / Speed Up
       // PageDown: Standard pedal "next" key
       // ArrowRight: Alternative "next" key
       if (['PageDown', 'ArrowRight'].includes(e.code)) {
         e.preventDefault();
-        pageScroll('down');
+        if (isScrolling) {
+            // New Requirement: Speed Up by ~10%
+            handleSpeedAdjustment(1.1);
+        } else {
+            // Existing Requirement: Page Flip
+            pageScroll('down');
+        }
         return;
       }
 
-      // 4. Page Up
+      // 4. Page Up / Slow Down
       // PageUp: Standard pedal "prev" key
       // ArrowLeft: Alternative "prev" key
       if (['PageUp', 'ArrowLeft'].includes(e.code)) {
         e.preventDefault();
-        pageScroll('up');
+        if (isScrolling) {
+            // New Requirement: Slow Down by ~10%
+            handleSpeedAdjustment(0.9);
+        } else {
+             // Existing Requirement: Page Flip
+            pageScroll('up');
+        }
         return;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [pageScroll, handleReset]); // Dependencies added to prevent stale closures
+  }, [pageScroll, handleReset, isScrolling, handleSpeedAdjustment]); // Added isScrolling and speed handler to dependencies
 
   // Fullscreen Toggle
   const toggleFullscreen = async () => {
