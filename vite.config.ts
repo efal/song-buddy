@@ -20,6 +20,8 @@ export default defineConfig({
         background_color: '#111827',
         display: 'standalone',
         orientation: 'any',
+        start_url: '/',
+        scope: '.',
         icons: [
           {
             src: 'https://via.placeholder.com/192x192.png?text=SB',

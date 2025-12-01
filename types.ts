@@ -8,6 +8,7 @@ export interface MetronomeConfig {
   beatsPerBar: number;
   clickPitch: number; // Frequency in Hz (e.g., 1000)
   enabled: boolean; // Default state when entering live mode
+  soundType: 'beep' | 'drums'; // Sound type: classic beep or drum sounds
 }
 
 export interface Song {
@@ -39,6 +40,7 @@ export const DEFAULT_SONG: Omit<Song, 'id' | 'createdAt'> = {
     bpm: 120,
     beatsPerBar: 4,
     clickPitch: 1000,
-    enabled: false
+    enabled: false,
+    soundType: 'drums'
   }
 };
