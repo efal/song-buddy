@@ -15,6 +15,13 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   const [isMonitoring, setIsMonitoring] = useState(true);
   const [isScrolling, setIsScrolling] = useState(false);
 
+  // Tap Tempo state
+  const [tapTimes, setTapTimes] = useState<number[]>([]);
+  const tapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Tempo Input Mode (for Bluetooth pedal)
+  const [isTempoInputMode, setIsTempoInputMode] = useState(false);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
   const lastFrameTime = useRef<number>(0);
@@ -161,6 +168,61 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
     onUpdate({ ...songRef.current, scrollspeed: newSpeed });
   }, [onUpdate]);
 
+  // Tap Tempo handler
+  const handleTapTempo = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    const now = performance.now();
+
+    // Clear previous timeout
+    if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
+
+    setTapTimes(prev => {
+      const newTaps = [...prev, now];
+
+      // Keep only last 8 taps for averaging
+      if (newTaps.length > 8) newTaps.shift();
+
+      // Need at least 2 taps to calculate BPM
+      if (newTaps.length >= 2) {
+        // Calculate intervals between taps
+        const intervals: number[] = [];
+        for (let i = 1; i < newTaps.length; i++) {
+          intervals.push(newTaps[i] - newTaps[i - 1]);
+        }
+
+        // Average interval in milliseconds
+        const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+
+        // Convert to BPM (60000ms per minute)
+        const calculatedBpm = Math.round(60000 / avgInterval);
+
+        // Clamp to valid range
+        const clampedBpm = Math.max(30, Math.min(300, calculatedBpm));
+
+        setBpm(clampedBpm);
+        if (song.metronome) {
+          onUpdate({ ...song, metronome: { ...song.metronome, bpm: clampedBpm } });
+        }
+      }
+
+      return newTaps;
+    });
+
+    // Reset taps after 2 seconds of inactivity
+    tapTimeoutRef.current = setTimeout(() => {
+      setTapTimes([]);
+    }, 2000);
+  }, [setBpm, song, onUpdate]);
+
+  // BPM adjustment handlers
+  const adjustBpm = useCallback((delta: number) => {
+    const newBpm = Math.max(30, Math.min(300, bpm + delta));
+    setBpm(newBpm);
+    if (song.metronome) {
+      onUpdate({ ...song, metronome: { ...song.metronome, bpm: newBpm } });
+    }
+  }, [bpm, setBpm, song, onUpdate]);
+
   // --- KEYBOARD HANDLING (Persistent) ---
 
   const handlersRef = useRef({
@@ -187,6 +249,8 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Don't handle keys if Tempo Input Mode is active (except 'A' to close it)
+      if (isTempoInputMode && e.key !== 'a' && e.key !== 'A') return;
 
       const { toggleScroll, toggleMetronome, handleReset, pageScroll, handleSpeedAdjustment, onExit } = handlersRef.current;
       const isScrolling = isScrollingRef.current;
@@ -226,10 +290,15 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
           e.preventDefault();
           onExit();
           break;
-
         case 'Home':
           e.preventDefault();
           handleReset();
+          break;
+
+        case 'a':
+        case 'A':
+          e.preventDefault();
+          setIsTempoInputMode(prev => !prev);
           break;
       }
     };
@@ -239,7 +308,66 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
+  }, [isTempoInputMode]);
+
+  // Tempo Input Mode keyboard handler (for Bluetooth pedal)
+  useEffect(() => {
+    if (!isTempoInputMode) return;
+
+    const handleTempoKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+
+      switch (e.key) {
+        case 'Enter':
+          // Tap Tempo
+          const now = performance.now();
+          if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
+
+          setTapTimes(prev => {
+            const newTaps = [...prev, now];
+            if (newTaps.length > 8) newTaps.shift();
+
+            if (newTaps.length >= 2) {
+              const intervals: number[] = [];
+              for (let i = 1; i < newTaps.length; i++) {
+                intervals.push(newTaps[i] - newTaps[i - 1]);
+              }
+              const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+              const calculatedBpm = Math.round(60000 / avgInterval);
+              const clampedBpm = Math.max(30, Math.min(300, calculatedBpm));
+
+              setBpm(clampedBpm);
+              if (song.metronome) {
+                onUpdate({ ...song, metronome: { ...song.metronome, bpm: clampedBpm } });
+              }
+            }
+            return newTaps;
+          });
+
+          tapTimeoutRef.current = setTimeout(() => setTapTimes([]), 2000);
+          break;
+
+        case 'PageDown':
+          // +1 BPM
+          adjustBpm(1);
+          break;
+
+        case 'PageUp':
+          // -1 BPM
+          adjustBpm(-1);
+          break;
+
+        case 'a':
+        case 'A':
+          // Close popup and save
+          setIsTempoInputMode(false);
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleTempoKey);
+    return () => window.removeEventListener('keydown', handleTempoKey);
+  }, [isTempoInputMode, adjustBpm, setBpm, song, onUpdate]);
 
   // --- TOUCH HANDLING (Screen only) ---
 
@@ -325,6 +453,16 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
             <span className={`text-2xl font-bold ${isMetronomePlaying ? 'text-yellow-400' : 'text-white/70'}`}>
               {bpm}
             </span>
+            <button
+              onClick={handleTapTempo}
+              className={`px-3 py-2 rounded-lg text-sm font-bold transition-colors ${tapTimes.length > 0
+                ? 'bg-yellow-500 text-black'
+                : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
+              title="Tap Tempo: Click in rhythm"
+            >
+              {tapTimes.length > 0 ? `TAP ${tapTimes.length}` : 'TAP'}
+            </button>
           </div>
         </div>
       </div>
@@ -421,10 +559,66 @@ const LiveMode: React.FC<LiveModeProps> = ({ song, onExit, onUpdate }) => {
               }}
               className="flex-1 h-2 bg-white/20 rounded-lg appearance-none cursor-pointer accent-yellow-500/80"
             />
-            <span className="text-xs text-white/70 w-8">{bpm}</span>
+            <div className="flex items-center space-x-1">
+              <button
+                onClick={(e) => { e.stopPropagation(); adjustBpm(-1); }}
+                className="w-6 h-6 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-lg font-bold leading-none"
+                title="Decrease BPM"
+              >
+                −
+              </button>
+              <span className="text-xs text-white/70 w-8 text-center">{bpm}</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); adjustBpm(1); }}
+                className="w-6 h-6 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-lg font-bold leading-none"
+                title="Increase BPM"
+              >
+                +
+              </button>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Tempo Input Mode Popup (for Bluetooth pedal) */}
+      {isTempoInputMode && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="bg-gray-900 border-4 border-yellow-500 rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl">
+            <h2 className="text-3xl font-bold text-yellow-400 text-center mb-6">
+              🎵 Tempo Input Mode
+            </h2>
+
+            <div className="text-center mb-8">
+              <div className="text-6xl font-bold text-white mb-2">{bpm}</div>
+              <div className="text-xl text-gray-400">BPM</div>
+              {tapTimes.length > 0 && (
+                <div className="text-sm text-yellow-400 mt-2">
+                  {tapTimes.length} Tap{tapTimes.length > 1 ? 's' : ''}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-4 text-white/80">
+              <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                <span className="font-mono">RETURN</span>
+                <span>Tap Tempo</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                <span className="font-mono">PAGE DOWN</span>
+                <span>+1 BPM</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                <span className="font-mono">PAGE UP</span>
+                <span>-1 BPM</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-yellow-600/20 rounded-lg border border-yellow-500/50">
+                <span className="font-mono text-yellow-400">A</span>
+                <span className="text-yellow-400">Save & Close</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
